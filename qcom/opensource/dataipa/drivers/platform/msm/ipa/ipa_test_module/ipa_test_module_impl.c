@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-only
 /*
 * Copyright (c) 2017-2021, The Linux Foundation. All rights reserved.
 * Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
@@ -1086,7 +1086,7 @@ int connect_ipa_to_apps(struct test_endpoint_sys *rx_ep,
 	memset(&rx_ep->gsi_channel_props, 0,
 		sizeof(rx_ep->gsi_channel_props));
 	rx_ep->gsi_channel_props.prot = GSI_CHAN_PROT_GPI;
-	rx_ep->gsi_channel_props.dir = GSI_CHAN_DIR_FROM_GSI;
+	rx_ep->gsi_channel_props.dir = CHAN_DIR_FROM_GSI;
 	gsi_ep_config = ipa_get_gsi_ep_info(client);
 	if (!gsi_ep_config) {
 		IPATEST_ERR("invalid gsi_ep_config\n");
@@ -1191,7 +1191,7 @@ int connect_apps_to_ipa(struct test_endpoint_sys *tx_ep,
 
 	memset(&tx_ep->gsi_channel_props, 0, sizeof(tx_ep->gsi_channel_props));
 	tx_ep->gsi_channel_props.prot = GSI_CHAN_PROT_GPI;
-	tx_ep->gsi_channel_props.dir = GSI_CHAN_DIR_TO_GSI;
+	tx_ep->gsi_channel_props.dir = CHAN_DIR_TO_GSI;
 	gsi_ep_config = ipa_get_gsi_ep_info(client);
 	if (!gsi_ep_config) {
 		IPATEST_ERR("invalid gsi_ep_config\n");
