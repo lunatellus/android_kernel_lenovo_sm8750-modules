@@ -35,9 +35,6 @@
 
 struct msm_vidc_core *g_core;
 
-const char video_banner[] = "Video-Banner: (" __stringify(VIDEO_COMPILE_BY) "@"
-	__stringify(VIDEO_COMPILE_HOST) ") (" __stringify(VIDEO_COMPILE_TIME) ")";
-
 static inline bool is_video_device(struct device *dev)
 {
 	return !!(of_device_is_compatible(dev->of_node, "qcom,sm8450-vidc") ||
@@ -1003,7 +1000,7 @@ static int __init msm_vidc_init(void)
 {
 	int rc = 0;
 
-	d_vpr_h("%s: %s\n", __func__, video_banner);
+	d_vpr_h("%s\n", __func__);
 
 	rc = platform_driver_register(&msm_vidc_driver);
 	if (rc) {
