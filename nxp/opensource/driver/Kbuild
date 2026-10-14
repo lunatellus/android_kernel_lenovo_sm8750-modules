@@ -10,6 +10,9 @@ LINUXINCLUDE   += -I$(NFC_ROOT)/../../../qcom/opensource/securemsm-kernel/smcinv
 LINUXINCLUDE   += -I$(NFC_ROOT)/../../../qcom/opensource/securemsm-kernel/linux/
 LINUXINCLUDE   += -I$(NFC_ROOT)/../../../qcom/opensource/securemsm-kernel/include/linux/
 
+# Keep the secure peripheral support used by the sun Bazel target.
+ccflags-y += -DNFC_SECURE_PERIPHERAL_ENABLED
+
 obj-$(CONFIG_NXP_NFC_I2C) += nxp-nci.o
 
 #source files
