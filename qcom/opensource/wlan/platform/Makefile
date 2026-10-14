@@ -5,6 +5,8 @@ M ?= $(shell pwd)
 ifeq ($(WLAN_PLATFORM_ROOT),)
 WLAN_PLATFORM_ROOT = $(shell pwd)
 
+USE_EXTERNAL_CONFIGS := y
+
 # If it reaches here, compilation is probably without Android.mk,
 # so enable all flags (including debug flag CONFIG_CNSS2_DEBUG) by
 # default.
@@ -34,6 +36,7 @@ KBUILD_OPTIONS += CONFIG_ICNSS2=m
 KBUILD_OPTIONS += CONFIG_ICNSS2_QMI=y
 KBUILD_OPTIONS += CONFIG_ICNSS2_DEBUG=y
 endif
+KBUILD_OPTIONS += KBUILD_EXTRA_SYMBOLS=$(M)/../../data-kernel/drivers/smem-mailbox/Module.symvers
 endif
 
 all: modules
