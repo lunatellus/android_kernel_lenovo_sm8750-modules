@@ -55,6 +55,7 @@ def _define_module(target, variant):
         ])
     if target == "sun":
         deps.extend([
+            soc_label("{}/drivers/misc/awinic/haptic_hv/haptic".format(tv)),
             modules_label("qcom/opensource/synx-kernel:synx_headers"),
             modules_label("qcom/opensource/synx-kernel:{}_modules".format(tv)),
             modules_label("qcom/opensource/securemsm-kernel:smcinvoke_kernel_headers"),
@@ -207,6 +208,7 @@ def _define_module(target, variant):
             },
             "CONFIG_SPECTRA_SENSOR": {
                 True: [
+                    "drivers/cam_regulator/wl2868c/regulator_wl2868c.c",
                     "drivers/cam_sensor_module/cam_actuator/cam_actuator_dev.c",
                     "drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c",
                     "drivers/cam_sensor_module/cam_actuator/cam_actuator_soc.c",

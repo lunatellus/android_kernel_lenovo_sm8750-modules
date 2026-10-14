@@ -281,6 +281,7 @@ camera-$(CONFIG_SPECTRA_LRME) += \
 	drivers/cam_lrme/cam_lrme_context.o
 
 camera-$(CONFIG_SPECTRA_SENSOR) += \
+	drivers/cam_regulator/wl2868c/regulator_wl2868c.o \
 	drivers/cam_sensor_module/cam_actuator/cam_actuator_dev.o \
 	drivers/cam_sensor_module/cam_actuator/cam_actuator_core.o \
 	drivers/cam_sensor_module/cam_actuator/cam_actuator_soc.o \

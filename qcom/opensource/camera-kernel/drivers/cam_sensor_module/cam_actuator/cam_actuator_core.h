@@ -64,5 +64,8 @@ int32_t cam_actuator_driver_cmd(struct cam_actuator_ctrl_t *a_ctrl, void *arg);
  */
 void cam_actuator_shutdown(struct cam_actuator_ctrl_t *a_ctrl);
 
+int cam_actuator_power_on_from_other(struct cam_actuator_ctrl_t *a_ctrl);
+int cam_actuator_power_off_from_other(struct cam_actuator_ctrl_t *a_ctrl);
+
 struct completion *cam_actuator_get_i3c_completion(uint32_t index);
 #endif /* _CAM_ACTUATOR_CORE_H_ */

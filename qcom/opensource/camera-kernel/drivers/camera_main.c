@@ -87,6 +87,9 @@ struct camera_submodule {
 	const struct camera_submodule_component *component;
 };
 
+int wl2868c_chip_init_module(void);
+void wl2868c_chip_exit_module(void);
+
 static const struct camera_submodule_component camera_base[] = {
 	{&cam_req_mgr_init, &cam_req_mgr_exit},
 #ifdef CONFIG_SPECTRA_VMRM
@@ -123,10 +126,12 @@ static const struct camera_submodule_component camera_sensor[] = {
 	{&cam_cci_init_module, &cam_cci_exit_module},
 	{&cam_csiphy_init_module, &cam_csiphy_exit_module},
 	{&cam_tpg_init_module, &cam_tpg_exit_module},
+
 	{&cam_actuator_driver_init, &cam_actuator_driver_exit},
 	{&cam_sensor_driver_init, &cam_sensor_driver_exit},
 	{&cam_eeprom_driver_init, &cam_eeprom_driver_exit},
 	{&cam_ois_driver_init, &cam_ois_driver_exit},
+	{&wl2868c_chip_init_module, &wl2868c_chip_exit_module},
 	{&cam_flash_init_module, &cam_flash_exit_module},
 #endif
 };
@@ -344,6 +349,7 @@ static void camera_exit(void)
 	CAM_INFO(CAM_UTIL, "Spectra camera driver exited!");
 }
 
+#line 346 "drivers/camera_main.c"
 module_init(camera_init);
 module_exit(camera_exit);
 

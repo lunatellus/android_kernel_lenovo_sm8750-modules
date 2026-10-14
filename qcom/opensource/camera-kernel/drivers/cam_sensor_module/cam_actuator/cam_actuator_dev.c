@@ -12,6 +12,306 @@
 #include "camera_main.h"
 #include "cam_compat.h"
 #include "cam_mem_mgr_api.h"
+#include <linux/notifier.h>
+#include <linux/workqueue.h>
+#include <linux/delay.h>
+
+u32 globalStepNum;
+u32 globalTarget;
+u8 movingStatus;
+u8 isHoldByNode;
+u8 leftVibIsUsed;
+u8 rightVibIsUsed;
+u8 secondVibHasDelay;
+u8 poweroff_workStatus;
+int is_actuator_power_by_cam;
+int power_status;
+struct cam_actuator_ctrl_t *wide_a_ctrl;
+
+struct haptic_data {
+	int duration;
+	int id;
+	int mode;
+};
+
+static int haptic_callback(struct notifier_block *block,
+	unsigned long action, void *data);
+struct notifier_block nb;
+
+extern int register_haptic_notify(struct notifier_block *nb);
+extern int unregister_haptic_notify(struct notifier_block *nb);
+
+static void poweron_work_func(struct work_struct *work);
+static void poweroff_work_func(struct work_struct *work);
+static struct delayed_work poweron_work;
+static struct delayed_work poweroff_work;
+
+static void CreateVCMCtrol(int target, int step_num, int mode);
+
+static int haptic_callback(struct notifier_block *nb, unsigned long action,
+	void *data)
+{
+	struct haptic_data *haptic = data;
+
+	if (!haptic) {
+		CAM_ERR(CAM_ACTUATOR, "can't gethaptic_data_t!");
+		return NOTIFY_OK;
+	}
+
+	if (haptic->id == 1)
+		leftVibIsUsed = 1;
+	else if (haptic->id == 2)
+		rightVibIsUsed = 1;
+
+	if (isHoldByNode)
+		return NOTIFY_OK;
+
+	if (action == 2) {
+		CAM_DBG(CAM_ACTUATOR, "haptic_pull_vcm");
+		CreateVCMCtrol(0x200, 0, 0);
+	} else if (action == 1 &&
+		(haptic->duration > 0xc7 ||
+		 (haptic->mode == 2 && haptic->duration == 0))) {
+		CAM_DBG(CAM_ACTUATOR, "haptic_push_vcm");
+		CreateVCMCtrol(0, 15, 1);
+	}
+
+	return NOTIFY_OK;
+}
+
+static int readCode(void)
+{
+	u32 data = 0;
+	int rc;
+
+	rc = camera_io_dev_read(&wide_a_ctrl->io_master_info, 3, &data,
+		CAMERA_SENSOR_I2C_TYPE_BYTE, CAMERA_SENSOR_I2C_TYPE_WORD, true);
+	if (rc < 0) {
+		data = -1;
+#line 493 "drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c"
+		CAM_ERR(CAM_ACTUATOR, "readCode: failed ret =%d", rc);
+	}
+#line 495 "drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c"
+	CAM_DBG(CAM_ACTUATOR, "readCode data:%d", data);
+
+	return data;
+}
+
+static ssize_t moveVCM_show(struct device *dev, struct device_attribute *attr,
+	char *buf)
+{
+	int rc = readCode();
+
+	if (rc < 0) {
+#line 719 "drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c"
+		CAM_ERR(CAM_ACTUATOR, "failed");
+	}
+#line 721 "drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c"
+	CAM_DBG(CAM_ACTUATOR, "moveVCM_show readCode:%d", rc);
+
+	return sprintf(buf, "current:%d\n", rc);
+}
+
+static ssize_t moveVCM_store(struct device *dev,
+	struct device_attribute *attr, const char *buf, size_t count)
+{
+	u32 value = 0;
+	int rc;
+
+	rc = kstrtouint(buf, 0, &value);
+	if (rc < 0) {
+		CAM_ERR(CAM_ACTUATOR, "failed to parse moveVCM value: %d", rc);
+	} else if (!value) {
+		isHoldByNode = 1;
+		CreateVCMCtrol(0, 15, 1);
+	} else if (value == 0x200) {
+		CreateVCMCtrol(0x200, 4, 0);
+		isHoldByNode = 0;
+	} else if (value <= 0x3ff) {
+		CreateVCMCtrol(value, 4, 1);
+	} else {
+		CAM_ERR(CAM_ACTUATOR, "moveVCM value invalid: %d", value);
+	}
+
+	return count;
+}
+static DEVICE_ATTR(moveVCM, 0664, moveVCM_show, moveVCM_store);
+
+static void CreateVCMCtrol(int target, int step_num, int mode)
+{
+	struct cam_sensor_cci_client *cci_client;
+	int i;
+
+	if (!wide_a_ctrl) {
+		CAM_ERR(CAM_ACTUATOR, "wide_a_ctrl is NULL");
+		return;
+	}
+
+	cci_client = wide_a_ctrl->io_master_info.cci_client;
+	if (!cci_client->sid) {
+		cci_client->sid = 0xc;
+		cci_client->i2c_freq_mode = I2C_FAST_MODE;
+	}
+
+	CAM_DBG(CAM_ACTUATOR,
+		"wide_a_ctrl: salve_add[0x%x] i2c_freq_mode[%d] NAME[%s] power_status:%d poweroff_workStatus:%d movingStatus:%d",
+		cci_client->sid, cci_client->i2c_freq_mode,
+		wide_a_ctrl->soc_info.dev_name, power_status,
+		poweroff_workStatus, movingStatus);
+
+	if (is_actuator_power_by_cam == 1) {
+		CAM_ERR(CAM_ACTUATOR, "camera is open, skip move af!!");
+		return;
+	}
+
+	globalTarget = target;
+	globalStepNum = step_num;
+	if (mode & 1) {
+		if (movingStatus == 1) {
+			cancel_delayed_work(&poweroff_work);
+			if (leftVibIsUsed == 1 && rightVibIsUsed == 1 &&
+				!secondVibHasDelay) {
+				leftVibIsUsed = 0;
+				rightVibIsUsed = 0;
+				secondVibHasDelay = 1;
+				for (i = 0; i < 100; i++)
+					udelay(1000);
+			}
+			return;
+		}
+
+		if (power_status == 1 && readCode() == target) {
+			cancel_delayed_work(&poweroff_work);
+			CAM_DBG(CAM_ACTUATOR,
+				"vcm is on the target, no need move again");
+			return;
+		}
+
+		if (poweroff_workStatus == 1)
+			cancel_delayed_work(&poweroff_work);
+		queue_delayed_work(system_wq, &poweron_work, 0);
+		movingStatus = 1;
+		for (i = 0; i < 100; i++)
+			udelay(1000);
+	} else {
+		queue_delayed_work(system_wq, &poweroff_work,
+			msecs_to_jiffies(375));
+		poweroff_workStatus = 1;
+	}
+}
+
+static void poweron_work_func(struct work_struct *work)
+{
+	static const u8 init_reg_addr[] = { 2, 3, 4, 6, 7, 8 };
+	static const u8 init_reg_data[] = { 2, 2, 0, 4, 0x7c, 0x24 };
+	static const u16 center_positions[] = { 0x19a, 0x168, 0x15e };
+	struct cam_sensor_i2c_reg_array reg = {
+		.reg_addr = 3,
+	};
+	struct cam_sensor_i2c_reg_setting setting = {
+		.reg_setting = &reg,
+		.size = 1,
+		.addr_type = CAMERA_SENSOR_I2C_TYPE_BYTE,
+		.data_type = CAMERA_SENSOR_I2C_TYPE_WORD,
+	};
+	int target = globalTarget;
+	int steps = globalStepNum;
+	int step_size;
+	int position;
+	int delay_ms;
+	int rc;
+	int i;
+	int j;
+
+	if (!wide_a_ctrl)
+		return;
+
+	rc = cam_actuator_power_on_from_other(wide_a_ctrl);
+	if (rc < 0)
+		CAM_ERR(CAM_ACTUATOR, "failed in actuator power up rc %d", rc);
+
+	udelay(350);
+	for (i = 0; i < ARRAY_SIZE(init_reg_addr); i++) {
+		reg.reg_addr = init_reg_addr[i];
+		reg.reg_data = init_reg_data[i];
+		rc = camera_io_dev_write(&wide_a_ctrl->io_master_info, &setting);
+		if (rc < 0)
+			CAM_ERR(CAM_ACTUATOR, "VCM init write failed: %d", rc);
+	}
+
+	udelay(350);
+	reg.reg_addr = 3;
+	for (i = 0; i < ARRAY_SIZE(center_positions); i++) {
+		reg.reg_data = center_positions[i];
+		rc = camera_io_dev_write(&wide_a_ctrl->io_master_info, &setting);
+		if (rc < 0)
+			CAM_ERR(CAM_ACTUATOR, "VCM center write failed: %d", rc);
+		for (j = 0; j < 24; j++)
+			udelay(1000);
+	}
+
+	step_size = steps > 0 ? abs(target - 0x15e) / steps : 0;
+	for (i = steps - 1; i >= 0; i--) {
+		position = target >= 0x15f ?
+			target - i * step_size : target + i * step_size;
+		if (position < 0x8d)
+			delay_ms = 5;
+		else if (position < 0xf1)
+			delay_ms = 10;
+		else if (position < 0x123)
+			delay_ms = 15;
+		else
+			delay_ms = 20;
+
+		reg.reg_data = position;
+		rc = camera_io_dev_write(&wide_a_ctrl->io_master_info, &setting);
+		if (rc < 0)
+			CAM_ERR(CAM_ACTUATOR, "VCM write failed: %d", rc);
+		for (j = 0; j < delay_ms; j++)
+			udelay(1000);
+	}
+
+	if (readCode() != target) {
+		for (i = 0; i < 10; i++)
+			udelay(1000);
+		reg.reg_data = target;
+		rc = camera_io_dev_write(&wide_a_ctrl->io_master_info, &setting);
+		if (rc < 0)
+			CAM_ERR(CAM_ACTUATOR, "VCM write failed: %d", rc);
+		readCode();
+	}
+	movingStatus = 0;
+}
+
+static void poweroff_work_func(struct work_struct *work)
+{
+	bool poweroff_requested = poweroff_workStatus == 1;
+
+	poweroff_workStatus = 0;
+	leftVibIsUsed = 0;
+	rightVibIsUsed = 0;
+	secondVibHasDelay = 0;
+
+	if (!poweroff_requested || power_status != 1) {
+		CAM_DBG(CAM_ACTUATOR,
+			"poweroff_work_func power off no need");
+		return;
+	}
+
+	if (is_actuator_power_by_cam == 1) {
+		CAM_DBG(CAM_ACTUATOR,
+			"poweroff_work_func power off no need");
+		return;
+	}
+
+	CAM_DBG(CAM_ACTUATOR, "poweroff_work_func power off need");
+	if (wide_a_ctrl)
+		cam_actuator_power_off_from_other(wide_a_ctrl);
+}
+
+
+
+
 
 static struct cam_i3c_actuator_data {
 	struct cam_actuator_ctrl_t                  *a_ctrl;
@@ -30,6 +330,7 @@ static int cam_actuator_subdev_close_internal(struct v4l2_subdev *sd,
 		v4l2_get_subdevdata(sd);
 
 	if (!a_ctrl) {
+#line 57 "drivers/cam_sensor_module/cam_actuator/cam_actuator_dev.c"
 		CAM_ERR(CAM_ACTUATOR, "a_ctrl ptr is NULL");
 		return -EINVAL;
 	}
@@ -47,6 +348,7 @@ static int cam_actuator_subdev_close(struct v4l2_subdev *sd,
 	bool crm_active = cam_req_mgr_is_open();
 
 	if (crm_active) {
+#line 74 "drivers/cam_sensor_module/cam_actuator/cam_actuator_dev.c"
 		CAM_DBG(CAM_ACTUATOR,
 			"CRM is ACTIVE, close should be from CRM");
 		return 0;
@@ -366,25 +668,30 @@ static int cam_actuator_driver_i2c_probe(struct i2c_client *client)
 	int rc = 0;
 
 	if (client == NULL) {
+#line 387 "drivers/cam_sensor_module/cam_actuator/cam_actuator_dev.c"
 		CAM_ERR(CAM_ACTUATOR, "Invalid Args client: %pK",
 			client);
 		return -EINVAL;
 	}
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
+#line 345 "drivers/cam_sensor_module/cam_actuator/cam_actuator_dev.c"
 		CAM_ERR(CAM_ACTUATOR, "%s :: i2c_check_functionality failed",
 			 client->name);
 		return -EFAULT;
 	}
 
+#line 374 "drivers/cam_sensor_module/cam_actuator/cam_actuator_dev.c"
 	CAM_DBG(CAM_ACTUATOR, "Adding sensor actuator component");
 
 	cam_soc_util_initialize_power_domain(&client->dev);
 
 	rc = component_add(&client->dev, &cam_actuator_i2c_component_ops);
 	if (rc)
+#line 377 "drivers/cam_sensor_module/cam_actuator/cam_actuator_dev.c"
 		CAM_ERR(CAM_ACTUATOR, "failed to add component rc: %d", rc);
 
+#line 470 "drivers/cam_sensor_module/cam_actuator/cam_actuator_dev.c"
 	return rc;
 }
 #else
@@ -545,6 +852,10 @@ static int cam_actuator_platform_component_bind(struct device *dev,
 	CAM_DBG(CAM_ACTUATOR, "Component bound successfully %d",
 		a_ctrl->soc_info.index);
 
+	wide_a_ctrl = a_ctrl;
+	rc = sysfs_create_file(&pdev->dev.kobj, &dev_attr_moveVCM.attr);
+	INIT_DELAYED_WORK(&poweron_work, poweron_work_func);
+	INIT_DELAYED_WORK(&poweroff_work, poweroff_work_func);
 	g_i3c_actuator_data[a_ctrl->soc_info.index].a_ctrl = a_ctrl;
 	init_completion(&g_i3c_actuator_data[a_ctrl->soc_info.index].probe_complete);
 	CAM_GET_TIMESTAMP(ts_end);
@@ -584,6 +895,8 @@ static void cam_actuator_platform_component_unbind(struct device *dev,
 	cam_actuator_shutdown(a_ctrl);
 	mutex_unlock(&(a_ctrl->actuator_mutex));
 	cam_unregister_subdev(&(a_ctrl->v4l2_dev_str));
+	if (wide_a_ctrl)
+		wide_a_ctrl = NULL;
 	cam_worker_wrapper_deinit(a_ctrl->worker_ctx);
 	mutex_destroy(&a_ctrl->actuator_park_mutex);
 	mutex_destroy(&(a_ctrl->actuator_mutex));
@@ -610,6 +923,7 @@ static void cam_actuator_platform_remove(
 #endif
 {
 	component_del(&pdev->dev, &cam_actuator_platform_component_ops);
+	unregister_haptic_notify(&nb);
 
 	cam_soc_util_uninitialize_power_domain(&pdev->dev);
 
@@ -623,6 +937,7 @@ static const struct of_device_id cam_actuator_driver_dt_match[] = {
 	{}
 };
 
+#line 983 "drivers/cam_sensor_module/cam_actuator/cam_actuator_dev.c"
 static int32_t cam_actuator_driver_platform_probe(
 	struct platform_device *pdev)
 {
@@ -635,7 +950,8 @@ static int32_t cam_actuator_driver_platform_probe(
 	rc = component_add(&pdev->dev, &cam_actuator_platform_component_ops);
 	if (rc)
 		CAM_ERR(CAM_ACTUATOR, "failed to add component rc: %d", rc);
-
+	nb.notifier_call = haptic_callback;
+	register_haptic_notify(&nb);
 	return rc;
 }
 
@@ -677,6 +993,7 @@ struct i2c_driver cam_actuator_i2c_driver = {
 
 static struct i3c_device_id actuator_i3c_id[MAX_I3C_DEVICE_ID_ENTRIES + 1];
 
+#line 1039 "drivers/cam_sensor_module/cam_actuator/cam_actuator_dev.c"
 static int cam_actuator_i3c_driver_probe(struct i3c_device *client)
 {
 	int32_t                          rc = 0;
@@ -830,6 +1147,7 @@ int cam_actuator_driver_init(void)
 
 	rc = platform_driver_register(&cam_actuator_platform_driver);
 	if (rc < 0) {
+#line 1192 "drivers/cam_sensor_module/cam_actuator/cam_actuator_dev.c"
 		CAM_ERR(CAM_ACTUATOR,
 			"platform_driver_register failed rc = %d", rc);
 		return rc;
@@ -837,6 +1155,7 @@ int cam_actuator_driver_init(void)
 
 	rc = i2c_add_driver(&cam_actuator_i2c_driver);
 	if (rc) {
+#line 1199 "drivers/cam_sensor_module/cam_actuator/cam_actuator_dev.c"
 		CAM_ERR(CAM_ACTUATOR, "i2c_add_driver failed rc = %d", rc);
 		goto i2c_register_err;
 	}
@@ -845,6 +1164,7 @@ int cam_actuator_driver_init(void)
 
 	dev = of_find_node_by_path(I3C_SENSOR_DEV_ID_DT_PATH);
 	if (!dev) {
+#line 1207 "drivers/cam_sensor_module/cam_actuator/cam_actuator_dev.c"
 		CAM_DBG(CAM_ACTUATOR, "Couldnt Find the i3c-id-table dev node");
 		return 0;
 	}
@@ -861,6 +1181,7 @@ int cam_actuator_driver_init(void)
 
 	rc = i3c_driver_register_with_owner(&cam_actuator_i3c_driver, THIS_MODULE);
 	if (rc) {
+#line 1223 "drivers/cam_sensor_module/cam_actuator/cam_actuator_dev.c"
 		CAM_ERR(CAM_ACTUATOR, "i3c_driver registration failed, rc: %d", rc);
 		goto i3c_register_err;
 	}
@@ -884,6 +1205,7 @@ void cam_actuator_driver_exit(void)
 
 	dev = of_find_node_by_path(I3C_SENSOR_DEV_ID_DT_PATH);
 	if (!dev) {
+#line 1246 "drivers/cam_sensor_module/cam_actuator/cam_actuator_dev.c"
 		CAM_DBG(CAM_ACTUATOR, "Couldnt Find the i3c-id-table dev node");
 		return;
 	}

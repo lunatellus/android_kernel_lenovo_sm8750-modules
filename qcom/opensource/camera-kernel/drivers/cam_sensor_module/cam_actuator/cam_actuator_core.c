@@ -18,9 +18,9 @@ int32_t cam_actuator_construct_default_power_setting(
 {
 	int rc = 0;
 
-	power_info->power_setting_size = 1;
+	power_info->power_setting_size = 2;
 	power_info->power_setting =
-		CAM_MEM_ZALLOC(sizeof(struct cam_sensor_power_setting),
+		CAM_MEM_ZALLOC(2 * sizeof(struct cam_sensor_power_setting),
 			GFP_KERNEL);
 	if (!power_info->power_setting)
 		return -ENOMEM;
@@ -29,10 +29,14 @@ int32_t cam_actuator_construct_default_power_setting(
 	power_info->power_setting[0].seq_val = CAM_VAF;
 	power_info->power_setting[0].config_val = 1;
 	power_info->power_setting[0].delay = 2;
+	power_info->power_setting[1].seq_type = SENSOR_VIO;
+	power_info->power_setting[1].seq_val = CAM_VIO;
+	power_info->power_setting[1].config_val = 1;
+	power_info->power_setting[1].delay = 2;
 
-	power_info->power_down_setting_size = 1;
+	power_info->power_down_setting_size = 2;
 	power_info->power_down_setting =
-		CAM_MEM_ZALLOC(sizeof(struct cam_sensor_power_setting),
+		CAM_MEM_ZALLOC(2 * sizeof(struct cam_sensor_power_setting),
 			GFP_KERNEL);
 	if (!power_info->power_down_setting) {
 		rc = -ENOMEM;
@@ -42,7 +46,9 @@ int32_t cam_actuator_construct_default_power_setting(
 	power_info->power_down_setting[0].seq_type = SENSOR_VAF;
 	power_info->power_down_setting[0].seq_val = CAM_VAF;
 	power_info->power_down_setting[0].config_val = 0;
-
+	power_info->power_down_setting[1].seq_type = SENSOR_VIO;
+	power_info->power_down_setting[1].seq_val = CAM_VIO;
+	power_info->power_down_setting[1].config_val = 0;
 	return rc;
 
 free_power_settings:
@@ -52,6 +58,10 @@ free_power_settings:
 	return rc;
 }
 
+extern int is_actuator_power_by_cam;
+extern int power_status;
+
+#line 110 "drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c"
 static int32_t cam_actuator_power_up(struct cam_actuator_ctrl_t *a_ctrl)
 {
 	int rc = 0;
@@ -156,6 +166,58 @@ static int32_t cam_actuator_power_down(struct cam_actuator_ctrl_t *a_ctrl)
 	return rc;
 }
 
+int cam_actuator_power_on_from_other(struct cam_actuator_ctrl_t *a_ctrl)
+{
+	int rc = 0;
+
+#line 1221 "drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c"
+	CAM_INFO(CAM_ACTUATOR, "power on from other, power status:%d",
+		is_actuator_power_by_cam);
+
+	mutex_lock(&a_ctrl->actuator_mutex);
+	if (is_actuator_power_by_cam) {
+		mutex_unlock(&a_ctrl->actuator_mutex);
+		return rc;
+	}
+
+	rc = cam_actuator_power_up(a_ctrl);
+	if (rc < 0) {
+#line 1228 "drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c"
+		CAM_ERR(CAM_ACTUATOR, " Actuator Power up failed");
+	} else {
+		power_status = 1;
+	}
+	mutex_unlock(&a_ctrl->actuator_mutex);
+	return rc;
+}
+
+int cam_actuator_power_off_from_other(struct cam_actuator_ctrl_t *a_ctrl)
+{
+	int rc = 0;
+
+#line 1242 "drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c"
+	CAM_INFO(CAM_ACTUATOR, "power off from other, power status:%d",
+		is_actuator_power_by_cam);
+
+	mutex_lock(&a_ctrl->actuator_mutex);
+	if (is_actuator_power_by_cam) {
+		mutex_unlock(&a_ctrl->actuator_mutex);
+		return rc;
+	}
+
+	rc = cam_actuator_power_down(a_ctrl);
+	if (rc < 0) {
+#line 1249 "drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c"
+		CAM_ERR(CAM_ACTUATOR, " Actuator Power down failed");
+	}
+	power_status = 0;
+	mutex_unlock(&a_ctrl->actuator_mutex);
+	return rc;
+}
+#line 216 "drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c"
+
+
+#line 214 "drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c"
 static int32_t cam_actuator_i2c_modes_util(
 	struct camera_io_master *io_master_info,
 	struct i2c_settings_list *i2c_list)
@@ -216,6 +278,7 @@ static int32_t cam_actuator_i2c_modes_util(
 	return rc;
 }
 
+#line 274 "drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c"
 int32_t cam_actuator_slaveInfo_pkt_parser(struct cam_actuator_ctrl_t *a_ctrl,
 	uint32_t *cmd_buf, size_t len)
 {
@@ -248,6 +311,7 @@ int32_t cam_actuator_slaveInfo_pkt_parser(struct cam_actuator_ctrl_t *a_ctrl,
 	return rc;
 }
 
+#line 308 "drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c"
 int32_t cam_actuator_apply_settings(struct cam_actuator_ctrl_t *a_ctrl,
 	struct i2c_settings_array *i2c_set)
 {
@@ -415,14 +479,18 @@ int32_t cam_actuator_publish_dev_info(struct cam_req_mgr_device_info *info)
 	struct cam_actuator_ctrl_t *a_ctrl;
 
 	if (!info) {
+#line 475 "drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c"
 		CAM_ERR(CAM_ACTUATOR, "Invalid Args");
+#line 483 "drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c"
 		return -EINVAL;
 	}
 
 	a_ctrl = (struct cam_actuator_ctrl_t *)
 		cam_get_device_priv(info->dev_hdl);
 	if (!a_ctrl) {
+#line 482 "drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c"
 		CAM_ERR(CAM_ACTUATOR, "Device data is NULL");
+#line 490 "drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c"
 		return -EINVAL;
 	}
 
@@ -1000,6 +1068,7 @@ void cam_actuator_shutdown(struct cam_actuator_ctrl_t *a_ctrl)
 		rc = cam_actuator_power_down(a_ctrl);
 		if (rc < 0)
 			CAM_ERR(CAM_ACTUATOR, "Actuator Power down failed");
+		is_actuator_power_by_cam = 0;
 		a_ctrl->cam_act_state = CAM_ACTUATOR_ACQUIRE;
 	}
 
@@ -1269,6 +1338,7 @@ release_mutex:
 	return rc;
 }
 
+#line 1157 "drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c"
 int32_t cam_actuator_flush_request(struct cam_req_mgr_flush_request *flush_req)
 {
 	int32_t rc = 0, i;
