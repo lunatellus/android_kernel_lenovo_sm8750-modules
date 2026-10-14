@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023, 2025 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #ifndef _RMNET_SHS_WQ_H_
@@ -30,14 +30,52 @@
 #define RMNET_SHS_MIN_HSTAT_NODES_REQD 16
 #define RMNET_SHS_WQ_INTERVAL_MS  100
 
-#define RMNET_SHS_WQ_SUGG_MAX RMNET_SHS_WQ_SUGG_LL_PHY_CORE
+extern struct list_head rmnet_shs_wq_ep_tbl;
+
+/* stores wq and end point details */
+
+struct rmnet_shs_wq_ep_s {
+	u64 tcp_rx_bps;
+	u64 udp_rx_bps;
+	struct list_head ep_list_id;
+	struct net_device *ep;
+	int  new_lo_core[MAX_CPUS];
+	int  new_hi_core[MAX_CPUS];
+	u16 default_core_msk;
+	u16 pri_core_msk;
+	u16 rps_config_msk;
+	u8 is_ep_active;
+	int  new_lo_idx;
+	int  new_hi_idx;
+	int  new_lo_max;
+	int  new_hi_max;
+};
+
+struct rmnet_shs_wq_ep_list_s {
+	struct list_head ep_id;
+	struct rmnet_shs_wq_ep_s ep;
+};
+
+/* Types of suggestions made by shs wq */
+enum rmnet_shs_wq_suggestion_type {
+	RMNET_SHS_WQ_SUGG_NONE,
+	RMNET_SHS_WQ_SUGG_SILVER_TO_GOLD,
+	RMNET_SHS_WQ_SUGG_GOLD_TO_SILVER,
+	RMNET_SHS_WQ_SUGG_GOLD_BALANCE,
+	RMNET_SHS_WQ_SUGG_RMNET_TO_GOLD,
+	RMNET_SHS_WQ_SUGG_RMNET_TO_SILVER,
+	RMNET_SHS_WQ_SUGG_LL_FLOW_CORE,
+	RMNET_SHS_WQ_SUGG_LL_PHY_CORE,
+	RMNET_SHS_WQ_SUGG_MAX,
+};
+
+
 
 struct rmnet_shs_wq_hstat_s {
 	unsigned long int rmnet_shs_wq_suggs[RMNET_SHS_WQ_SUGG_MAX];
 	struct list_head cpu_node_id;
 	struct list_head hstat_node_id;
 	struct rmnet_shs_skbn_s *node; //back pointer to node
-	struct rcu_head rcu; /* Used to free struct*/
 	ktime_t c_epoch; /*current epoch*/
 	ktime_t l_epoch; /*last hash update epoch*/
 	ktime_t inactive_duration;
@@ -72,8 +110,8 @@ struct rmnet_shs_wq_hstat_s {
 	u16 suggested_cpu; /* recommended CPU to stamp pkts*/
 	u16 current_cpu; /* core where the flow is being processed*/
 	u16 skb_tport_proto;
-	u8 low_latency;
 	u8 ll_diff;
+
 	u8 mux_id;
 	u8 in_use;
 	u8 is_perm;
@@ -144,8 +182,80 @@ struct rmnet_shs_delay_wq_s {
 	struct delayed_work wq;
 };
 
-extern struct rmnet_shs_cpu_node_s rmnet_shs_cpu_node_tbl[MAX_CPUS];
+/* Structures to be used for creating sorted versions of flow and cpu lists */
+struct rmnet_shs_wq_cpu_cap_s {
+	struct list_head cpu_cap_list;
+	u64 pps_capacity;
+	u64 avg_pps_capacity;
+	u64 bps;
+	u16 cpu_num;
+};
 
+struct rmnet_shs_wq_gold_flow_s {
+	struct list_head gflow_list;
+	u64 rx_pps;
+	u64 avg_pps;
+	u32 hash;
+	u16 cpu_num;
+};
+
+struct rmnet_shs_wq_ll_flow_s {
+	struct list_head ll_flow_list;
+
+	union {
+		struct iphdr   v4hdr;
+		struct ipv6hdr v6hdr;
+	} ip_hdr;
+	union {
+		struct tcphdr tp;
+		struct udphdr up;
+	} trans_hdr;
+	u64 rx_pps;
+	u64 avg_pps;
+	u64 rx_bps;
+	u64 avg_segs;
+	u64 hw_coal_bytes_diff;
+	u64 hw_coal_bufsize_diff;
+	u32 hash;
+	u16 cpu_num;
+	u16 trans_proto;
+	u8  mux_id;
+	u8 ll_pipe;
+};
+
+struct rmnet_shs_wq_fflow_s {
+	struct list_head fflow_list;
+
+	union {
+		struct iphdr   v4hdr;
+		struct ipv6hdr v6hdr;
+	} ip_hdr;
+	union {
+		struct tcphdr tp;
+		struct udphdr up;
+	} trans_hdr;
+	u64 rx_pps;
+	u64 avg_pps;
+	u64 rx_bps;
+	u64 avg_segs;
+	u64 hw_coal_bytes_diff;
+	u64 hw_coal_bufsize_diff;
+	u32 hash;
+	u16 cpu_num;
+	u16 trans_proto;
+	u8  mux_id;
+};
+
+struct rmnet_shs_wq_ss_flow_s {
+	struct list_head ssflow_list;
+	u64 rx_pps;
+	u64 avg_pps;
+	u64 rx_bps;
+	u32 hash;
+	u32 bif;
+	u32 ack_thresh;
+	u16 cpu_num;
+};
 
 /* Tracing Definitions */
 enum rmnet_shs_wq_trace_func {
@@ -224,18 +334,42 @@ enum rmnet_shs_wq_trace_evt {
 	RMNET_SHS_WQ_FLOW_SEG_SET_FAIL,
 };
 
+extern struct rmnet_shs_cpu_node_s rmnet_shs_cpu_node_tbl[MAX_CPUS];
+extern struct list_head rmnet_shs_wq_hstat_tbl;
+extern struct workqueue_struct *rmnet_shs_wq;
+
 void rmnet_shs_wq_init(void);
 void rmnet_shs_wq_exit(void);
 void rmnet_shs_wq_restart(void);
 void rmnet_shs_wq_pause(void);
+
+void rmnet_shs_update_cfg_mask(void);
+void rmnet_shs_wq_refresh_ep_masks(void);
+
+u64 rmnet_shs_wq_get_max_pps_among_cores(u32 core_msk);
 void rmnet_shs_wq_create_new_flow(struct rmnet_shs_skbn_s *node_p);
 int rmnet_shs_wq_get_least_utilized_core(u16 core_msk);
+int rmnet_shs_wq_get_lpwr_cpu_new_flow(struct net_device *dev);
+int rmnet_shs_wq_get_perf_cpu_new_flow(struct net_device *dev);
+u64 rmnet_shs_wq_get_max_allowed_pps(u16 cpu);
+void rmnet_shs_wq_inc_cpu_flow(u16 cpu);
+void rmnet_shs_wq_dec_cpu_flow(u16 cpu);
+void rmnet_shs_hstat_tbl_delete(void);
+void rmnet_shs_wq_set_ep_active(struct net_device *dev);
+void rmnet_shs_wq_reset_ep_active(struct net_device *dev);
 void rmnet_shs_wq_refresh_new_flow_list(void);
+
 int rmnet_shs_wq_try_to_move_flow(u16 cur_cpu, u16 dest_cpu, u32 hash_to_move,
 				  u32 sugg_type);
+
 int rmnet_shs_wq_set_flow_segmentation(u32 hash_to_set, u8 segs_per_skb);
 int rmnet_shs_wq_set_quickack_thresh(u32 hash_to_set, u32 ack_thresh);
+
 void rmnet_shs_ep_lock_bh(void);
+
 void rmnet_shs_ep_unlock_bh(void);
-void rmnet_shs_wq_cleanup_hash_tbl(u8 force_clean, u32 hash_to_clean);
+void rmnet_shs_wq_update_stats(void);
+int rmnet_shs_cpu_psb_above_thresh(unsigned cpu_num, unsigned thresh);
+
+
 #endif /*_RMNET_SHS_WQ_H_*/

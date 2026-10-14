@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2018-2021 The Linux Foundation. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/skbuff.h>
@@ -10,9 +10,8 @@
 #include <linux/ipv6.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
-#include <linux/unistd.h>
+
 #include "rmnet_shs_wq.h"
-#include <uapi/linux/rmnet_shs.h>
 
 #ifndef _RMNET_SHS_H_
 #define _RMNET_SHS_H_
@@ -43,7 +42,6 @@
 #define MAIN_CORE 0
 #define UPDATE_MASK 0xFF
 #define MAX_FLOWS 700
-
 #define DEF_LL_CORE 4
 
 #define DEFAULT_PIN_HASH 0x00AAAAAA
@@ -112,7 +110,6 @@ struct rmnet_shs_cfg_s {
 	atomic_long_t num_flows;
 	ktime_t lpm_ring;
 	struct wakeup_source *ws;
-	u32 usr_version;
 	u16 max_phy_steer;
 	u16 feature_mask;
 	u8 num_filters;
@@ -181,7 +178,6 @@ struct rmnet_shs_skbn_s {
 	u32 bif;
 	/*bytes in flight*/
 	u32 ack_thresh;
-	u32 ip_fam;
 	/*quickack threshold*/
 	u16 map_index;
 	/* rps map index assigned*/
@@ -197,9 +193,6 @@ struct rmnet_shs_skbn_s {
 	u8 is_shs_enabled;
 	u8 low_latency;
 	u8 ll_flag;
-	u8 l4s;
-	u8 ecn_capable;
-
 	/*Is SHS enabled for this flow*/
 	u8 mux_id;
 };
@@ -216,7 +209,6 @@ enum rmnet_shs_low_latency_state_e {
 	RMNET_SHS_NOT_LOW_LATENCY,
 	RMNET_SHS_LOW_LATENCY_MATCH,
 	RMNET_SHS_LOW_LATENCY_CHECK,
-	RMNET_SHS_TRUE_LOW_LATENCY,
 	RMNET_SHS_LL_MAX_STATE
 };
 
@@ -322,7 +314,6 @@ enum rmnet_shs_crit_err_e {
 	RMNET_SHS_MAX_LL_FILTERS,
 	RMNET_SHS_RESERVE_CPU,
 	RMNET_SHS_RESERVE_LIMIT,
-	RMNET_SHS_INVALID_HNODE,
 
 	RMNET_SHS_CRIT_ERR_MAX
 };
@@ -486,26 +477,37 @@ extern spinlock_t rmnet_shs_ep_lock;
 extern spinlock_t rmnet_shs_hstat_tbl_lock;
 extern struct hlist_head RMNET_SHS_HT[1 << (RMNET_SHS_HT_SIZE)];
 
-
+void rmnet_shs_skb_entry_disable(void);
+void rmnet_shs_skb_entry_enable(void);
+void rmnet_shs_switch_disable(void);
+void rmnet_shs_switch_enable(void);
+int rmnet_shs_is_lpwr_cpu(u16 cpu);
 void rmnet_shs_cancel_table(void);
 void rmnet_shs_rx_wq_init(void);
-void rmnet_shs_rx_wq_exit(void);
+unsigned int rmnet_shs_rx_wq_exit(void);
 int rmnet_shs_get_mask_len(u8 mask);
+
+int rmnet_shs_chk_and_flush_node(struct rmnet_shs_skbn_s *node,
+				 u8 force_flush, u8 ctxt, struct sk_buff **phy_list);
 void rmnet_shs_pb_hdr_handler(struct rmnet_map_pb_ind_hdr *pbhdr);
 void rmnet_shs_dl_hdr_handler_v2(struct rmnet_map_dl_ind_hdr *dlhdr,
 			      struct rmnet_map_control_command_header *qcmd);
 void rmnet_shs_dl_trl_handler_v2(struct rmnet_map_dl_ind_trl *dltrl,
 			      struct rmnet_map_control_command_header *qcmd);
-
+void rmnet_shs_dl_hdr_handler(struct rmnet_map_dl_ind_hdr *dlhdr);
+void rmnet_shs_dl_trl_handler(struct rmnet_map_dl_ind_trl *dltrl);
 int rmnet_shs_assign(struct sk_buff *skb, struct rmnet_shs_clnt_s *cfg);
-
+void rmnet_shs_flush_table(u8 is_force_flush, u8 ctxt);
+void rmnet_shs_cpu_node_remove(struct rmnet_shs_skbn_s *node);
 void rmnet_shs_init(struct net_device *dev, struct net_device *vnd);
-void rmnet_shs_exit(void);
+void rmnet_shs_exit(unsigned int cpu_switch);
 void rmnet_shs_ps_on_hdlr(void *port);
 void rmnet_shs_ps_off_hdlr(void *port);
 void rmnet_shs_update_cpu_proc_q_all_cpus(void);
 void rmnet_shs_clear_node(struct rmnet_shs_skbn_s *node, u8 ctxt);
 void rmnet_shs_change_cpu_num_flows(u16 map_cpu, bool inc);
-u32 rmnet_shs_get_cpu_qhead(u8 cpu_num);
 
+void rmnet_shs_deliver_skb(struct sk_buff *skb);
+
+u32 rmnet_shs_get_cpu_qhead(u8 cpu_num);
 #endif /* _RMNET_SHS_H_ */

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2020-2021 The Linux Foundation. All rights reserved.
- * Copyright (c) 2023-2025 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2023-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/module.h>
@@ -24,6 +24,11 @@ struct cpu_freq {
 	unsigned int freq_floor;
 	unsigned int freq_ceil;
 };
+
+unsigned int rmnet_shs_freq_enable __read_mostly = 1;
+module_param(rmnet_shs_freq_enable, uint, 0644);
+MODULE_PARM_DESC(rmnet_shs_freq_enable, "Enable/disable freq boost feature");
+
 /* Shared workqueue between existing boosting and pb marker boosting*/
 struct workqueue_struct *shs_boost_wq;
 

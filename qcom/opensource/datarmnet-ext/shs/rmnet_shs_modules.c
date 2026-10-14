@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2020-2021 The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2025 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include "rmnet_shs.h"
@@ -270,39 +270,3 @@ MODULE_PARM_DESC(rmnet_shs_no_sync_off, "rmnet no sync feature toggle");
 unsigned int rmnet_shs_no_sync_packets = 0;
 module_param(rmnet_shs_no_sync_packets, uint, 0644);
 MODULE_PARM_DESC(rmnet_shs_no_sync_packets, "rmnet shs async packet count");
-
-unsigned int rmnet_shs_wake __read_mostly = 0;
-module_param(rmnet_shs_wake, uint, 0644);
-MODULE_PARM_DESC(rmnet_shs_wake, "wake status");
-
-unsigned int rmnet_shs_perf_duration __read_mostly = 200;
-module_param(rmnet_shs_perf_duration, uint, 0644);
-MODULE_PARM_DESC(rmnet_shs_duration, "up duty cycle in ms");
-
-unsigned int rmnet_shs_max_qmap_pkt __read_mostly = 850;
-module_param(rmnet_shs_max_qmap_pkt, uint, 0644);
-MODULE_PARM_DESC(rmnet_shs_max_qmap_pkt, "Max interleaved ipa pkts shs will park");
-
-unsigned int rmnet_shs_max_qmap_wait __read_mostly = 140;
-module_param(rmnet_shs_max_qmap_wait, uint, 0644);
-MODULE_PARM_DESC(rmnet_shs_max_qmap_pkt, "Max interleaved ipa pkts shs will be park for (ms)");
-
-unsigned int rmnet_shs_max_qmap_steer __read_mostly = 7000;
-module_param(rmnet_shs_max_qmap_steer, uint, 0644);
-MODULE_PARM_DESC(rmnet_shs_max_qmap_steer, "Max packets shs will steer");
-
-unsigned int rmnet_shs_max_phy_backlog __read_mostly = 0;
-module_param(rmnet_shs_max_phy_backlog, uint, 0644);
-MODULE_PARM_DESC(rmnet_shs_max_phy_backlog, "Max phy backlog seen");
-
-unsigned int rmnet_shs_esp_pkts __read_mostly = 0;
-module_param(rmnet_shs_esp_pkts, uint, 0644);
-MODULE_PARM_DESC(rmnet_shs_esp_pkts, " Esp packets seen");
-
-unsigned int rmnet_shs_pb_boost_timer_ms __read_mostly = 50;
-module_param(rmnet_shs_pb_boost_timer_ms, uint, 0644);
-MODULE_PARM_DESC(rmnet_shs_pb_boost_timer_ms, "Duration that PB Boost will be active for before reset");
-
-unsigned int rmnet_shs_freq_enable __read_mostly = 1;
-module_param(rmnet_shs_freq_enable, uint, 0644);
-MODULE_PARM_DESC(rmnet_shs_freq_enable, "Enable/disable freq boost feature");

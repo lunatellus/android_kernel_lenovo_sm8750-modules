@@ -1,70 +1,40 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2020-2021 The Linux Foundation. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include "rmnet_shs.h"
 #include "rmnet_shs_wq.h"
 #include "rmnet_shs_modules.h"
-#include "rmnet_module.h"
 #include <net/ip.h>
 #include <linux/cpu.h>
 #include <linux/bitmap.h>
 #include <linux/netdevice.h>
 #include <linux/kernel.h>
-#include <linux/smp.h>
-#include <linux/ipv6.h>
-#include <net/dsfield.h>
 
+#include <linux/smp.h>
+
+#include <linux/ipv6.h>
+#include <linux/netdevice.h>
 
 #define INCREMENT 1
 #define DECREMENT 0
-
-static int rmnet_shs_switch_hook_entry(struct sk_buff *skb,
-				       struct rmnet_shs_clnt_s *cfg)
+/* Helper functions to add and remove entries to the table
+ * that maintains a list of all endpoints (vnd's) available on this device.
+ */
+void rmnet_shs_ep_tbl_add(struct rmnet_shs_wq_ep_s *ep)
 {
-	struct rmnet_skb_cb *cb = RMNET_SKB_CB(skb);
-
-	if (!cb->qmap_steer && skb->priority != 0xda1a) {
-		cb->qmap_steer = 1;
-		rmnet_shs_assign(skb, cfg);
-		return 1;
-	}
-
-	return 0;
+	trace_rmnet_shs_wq_low(RMNET_SHS_WQ_EP_TBL, RMNET_SHS_WQ_EP_TBL_ADD,
+				0xDEF, 0xDEF, 0xDEF, 0xDEF, ep, NULL);
+	list_add(&ep->ep_list_id, &rmnet_shs_wq_ep_tbl);
 }
 
-static const struct rmnet_module_hook_register_info
-rmnet_shs_switch_hook = {
-	.hooknum = RMNET_MODULE_HOOK_SHS_SWITCH,
-	.func = rmnet_shs_switch_hook_entry,
-};
-
-void rmnet_shs_switch_disable(void)
+void rmnet_shs_ep_tbl_remove(struct rmnet_shs_wq_ep_s *ep)
 {
-	rmnet_module_hook_unregister_no_sync(&rmnet_shs_switch_hook, 1);
-}
-
-void rmnet_shs_switch_enable(void)
-{
-	rmnet_module_hook_register(&rmnet_shs_switch_hook, 1);
-}
-
-static const struct rmnet_module_hook_register_info
-rmnet_shs_skb_entry_hook = {
-	.hooknum = RMNET_MODULE_HOOK_SHS_SKB_ENTRY,
-	.func = rmnet_shs_assign,
-};
-
-void rmnet_shs_skb_entry_disable(void)
-{
-	rmnet_module_hook_unregister_no_sync(&rmnet_shs_skb_entry_hook, 1);
-}
-
-void rmnet_shs_skb_entry_enable(void)
-{
-	rmnet_module_hook_register(&rmnet_shs_skb_entry_hook, 1);
+	trace_rmnet_shs_wq_low(RMNET_SHS_WQ_EP_TBL, RMNET_SHS_WQ_EP_TBL_DEL,
+				0xDEF, 0xDEF, 0xDEF, 0xDEF, ep, NULL);
+	list_del_init(&ep->ep_list_id);
 }
 
 /* Helper functions to add and remove entries to the table
@@ -101,7 +71,7 @@ void rmnet_shs_cpu_list_remove(struct rmnet_shs_wq_hstat_s *hnode)
 			    RMNET_SHS_WQ_CPU_HSTAT_TBL_DEL,
 			    0xDEF, 0xDEF, 0xDEF, 0xDEF, hnode, NULL);
     spin_lock_bh(&rmnet_shs_hstat_tbl_lock);
-    list_del_rcu(&hnode->cpu_node_id);
+    list_del_init(&hnode->cpu_node_id);
     spin_unlock_bh(&rmnet_shs_hstat_tbl_lock);
 }
 
@@ -113,7 +83,7 @@ void rmnet_shs_cpu_list_add(struct rmnet_shs_wq_hstat_s *hnode,
 			    0xDEF, 0xDEF, 0xDEF, 0xDEF, hnode, NULL);
 
     spin_lock_bh(&rmnet_shs_hstat_tbl_lock);
-    list_add_rcu(&hnode->cpu_node_id, head);
+    list_add(&hnode->cpu_node_id, head);
     spin_unlock_bh(&rmnet_shs_hstat_tbl_lock);
 }
 
@@ -139,12 +109,43 @@ void rmnet_shs_ep_unlock_bh(void)
 	spin_unlock_bh(&rmnet_shs_ep_lock);
 }
 
+void rmnet_shs_update_cfg_mask(void)
+{
+	/* Start with most avaible mask all eps could share*/
+	u8 mask = UPDATE_MASK;
+	u8 rps_enabled = 0;
+	struct rmnet_shs_wq_ep_s *ep;
+
+	list_for_each_entry(ep, &rmnet_shs_wq_ep_tbl, ep_list_id) {
+
+		if (!ep->is_ep_active)
+			continue;
+		/* Bitwise and to get common mask from non-null masks.
+		 * VNDs with different mask  will have UNDEFINED behavior
+		 */
+		if (ep->rps_config_msk) {
+			mask &= ep->rps_config_msk;
+			rps_enabled = 1;
+		}
+	}
+
+	if (!rps_enabled) {
+		rmnet_shs_cfg.map_mask = 0;
+		rmnet_shs_cfg.map_len = 0;
+		return;
+        } else if (rmnet_shs_cfg.map_mask != mask) {
+		rmnet_shs_cfg.map_mask = mask;
+		rmnet_shs_cfg.map_len = rmnet_shs_get_mask_len(mask);
+		pr_info("rmnet_shs:  mask: 0x%x maplen: %d\n", rmnet_shs_cfg.map_mask, rmnet_shs_cfg.map_len);
+	}
+}
+
 void rmnet_shs_cpu_node_remove(struct rmnet_shs_skbn_s *node)
 {
 	SHS_TRACE_LOW(RMNET_SHS_CPU_NODE, RMNET_SHS_CPU_NODE_FUNC_REMOVE,
 			    0xDEF, 0xDEF, 0xDEF, 0xDEF, NULL, NULL);
 
-	list_del_rcu(&node->node_id);
+	list_del_init(&node->node_id);
 	rmnet_shs_change_cpu_num_flows(node->map_cpu, DECREMENT);
 
 }
@@ -155,7 +156,7 @@ void rmnet_shs_cpu_node_add(struct rmnet_shs_skbn_s *node,
 	SHS_TRACE_LOW(RMNET_SHS_CPU_NODE, RMNET_SHS_CPU_NODE_FUNC_ADD,
 			    0xDEF, 0xDEF, 0xDEF, 0xDEF, NULL, NULL);
 
-	list_add_rcu(&node->node_id, hd);
+	list_add(&node->node_id, hd);
 	rmnet_shs_change_cpu_num_flows(node->map_cpu, INCREMENT);
 }
 
@@ -232,6 +233,194 @@ u32 rmnet_shs_get_cpu_qdiff(u8 cpu_num)
 	return ret;
 }
 
+/* Comparison function to sort ll flow loads - based on flow avg_pps
+ * return -1 if a is before b, 1 if a is after b, 0 if equal
+ */
+int cmp_fn_ll_flow_pps(void *priv, const struct list_head *a, const struct list_head *b)
+{
+	struct rmnet_shs_wq_ll_flow_s *flow_a;
+	struct rmnet_shs_wq_ll_flow_s *flow_b;
+
+	if (!a || !b)
+		return 0;
+
+	flow_a = list_entry(a, struct rmnet_shs_wq_ll_flow_s, ll_flow_list);
+	flow_b = list_entry(b, struct rmnet_shs_wq_ll_flow_s, ll_flow_list);
+
+	if (flow_a->avg_pps > flow_b->avg_pps)
+		return -1;
+	else if (flow_a->avg_pps < flow_b->avg_pps)
+		return 1;
+
+	return 0;
+}
+
+/* Comparison function to sort filter flow loads - based on flow avg_pps
+ * return -1 if a is before b, 1 if a is after b, 0 if equal
+ */
+int cmp_fn_filter_flow_pps(void *priv, const struct list_head *a, const struct list_head *b)
+{
+	struct rmnet_shs_wq_fflow_s *flow_a;
+	struct rmnet_shs_wq_fflow_s *flow_b;
+
+	if (!a || !b)
+		return 0;
+
+	flow_a = list_entry(a, struct rmnet_shs_wq_fflow_s, fflow_list);
+	flow_b = list_entry(b, struct rmnet_shs_wq_fflow_s, fflow_list);
+
+	if (flow_a->avg_pps > flow_b->avg_pps)
+		return -1;
+	else if (flow_a->avg_pps < flow_b->avg_pps)
+		return 1;
+
+	return 0;
+}
+
+/* Comparison function to sort gold flow loads - based on flow avg_pps
+ * return -1 if a is before b, 1 if a is after b, 0 if equal
+ */
+int cmp_fn_flow_pps(void *priv, const struct list_head *a, const struct list_head *b)
+{
+	struct rmnet_shs_wq_gold_flow_s *flow_a;
+	struct rmnet_shs_wq_gold_flow_s *flow_b;
+
+	if (!a || !b)
+		return 0;
+
+	flow_a = list_entry(a, struct rmnet_shs_wq_gold_flow_s, gflow_list);
+	flow_b = list_entry(b, struct rmnet_shs_wq_gold_flow_s, gflow_list);
+
+	if (flow_a->avg_pps > flow_b->avg_pps)
+		return -1;
+	else if (flow_a->avg_pps < flow_b->avg_pps)
+		return 1;
+
+	return 0;
+}
+
+/* Comparison function to sort cpu capacities - based on cpu avg_pps capacity
+ * return -1 if a is before b, 1 if a is after b, 0 if equal
+ */
+int cmp_fn_cpu_pps(void *priv, const struct list_head *a, const struct list_head *b)
+{
+	struct rmnet_shs_wq_cpu_cap_s *cpu_a;
+	struct rmnet_shs_wq_cpu_cap_s *cpu_b;
+
+	if (!a || !b)
+		return 0;
+
+	cpu_a = list_entry(a, struct rmnet_shs_wq_cpu_cap_s, cpu_cap_list);
+	cpu_b = list_entry(b, struct rmnet_shs_wq_cpu_cap_s, cpu_cap_list);
+
+	if (cpu_a->avg_pps_capacity > cpu_b->avg_pps_capacity)
+		return -1;
+	else if (cpu_a->avg_pps_capacity < cpu_b->avg_pps_capacity)
+		return 1;
+
+	return 0;
+}
+
+/* Return Invalid core if only pri core available*/
+int rmnet_shs_wq_get_lpwr_cpu_new_flow(struct net_device *dev)
+{
+	u8 lo_idx;
+	u8 lo_max;
+	int cpu_assigned = -1;
+	u8 is_match_found = 0;
+	struct rmnet_shs_wq_ep_s *ep = NULL;
+
+	if (!dev) {
+		rmnet_shs_crit_err[RMNET_SHS_NETDEV_ERR]++;
+		return cpu_assigned;
+	}
+
+	spin_lock_bh(&rmnet_shs_ep_lock);
+	list_for_each_entry(ep, &rmnet_shs_wq_ep_tbl, ep_list_id) {
+		if (!ep->is_ep_active)
+			continue;
+
+		if (ep->ep == dev) {
+			is_match_found = 1;
+			break;
+		}
+
+	}
+
+	if (!is_match_found) {
+		rmnet_shs_crit_err[RMNET_SHS_WQ_EP_ACCESS_ERR]++;
+		spin_unlock_bh(&rmnet_shs_ep_lock);
+		return cpu_assigned;
+	}
+
+	lo_idx = ep->new_lo_idx;
+	lo_max = ep->new_lo_max;
+
+	while (lo_idx < lo_max) {
+		if (ep->new_lo_core[lo_idx] >= 0) {
+			cpu_assigned = ep->new_lo_core[lo_idx];
+			break;
+		}
+		lo_idx++;
+	}
+
+	/* Increment CPU assignment idx to be ready for next flow assignment*/
+	if ((cpu_assigned >= 0) || ((ep->new_lo_idx + 1) >= ep->new_lo_max))
+		ep->new_lo_idx = ((ep->new_lo_idx + 1) % ep->new_lo_max);
+	spin_unlock_bh(&rmnet_shs_ep_lock);
+
+	return cpu_assigned;
+}
+
+int rmnet_shs_wq_get_perf_cpu_new_flow(struct net_device *dev)
+{
+	struct rmnet_shs_wq_ep_s *ep = NULL;
+	int cpu_assigned = -1;
+	u8 hi_idx;
+	u8 hi_max;
+	u8 is_match_found = 0;
+
+	if (!dev) {
+		rmnet_shs_crit_err[RMNET_SHS_NETDEV_ERR]++;
+		return cpu_assigned;
+	}
+
+	spin_lock_bh(&rmnet_shs_ep_lock);
+	list_for_each_entry(ep, &rmnet_shs_wq_ep_tbl, ep_list_id) {
+
+		if (!ep->is_ep_active)
+			continue;
+
+		if (ep->ep == dev) {
+			is_match_found = 1;
+			break;
+		}
+	}
+
+	if (!is_match_found) {
+		rmnet_shs_crit_err[RMNET_SHS_WQ_EP_ACCESS_ERR]++;
+		spin_unlock_bh(&rmnet_shs_ep_lock);
+		return cpu_assigned;
+	}
+
+	hi_idx = ep->new_hi_idx;
+	hi_max = ep->new_hi_max;
+
+	while (hi_idx < hi_max) {
+		if (ep->new_hi_core[hi_idx] >= 0) {
+			cpu_assigned = ep->new_hi_core[hi_idx];
+			break;
+		}
+		hi_idx++;
+	}
+	/* Increment CPU assignment idx to be ready for next flow assignment*/
+	if (cpu_assigned >= 0)
+		ep->new_hi_idx = ((hi_idx + 1) % hi_max);
+	spin_unlock_bh(&rmnet_shs_ep_lock);
+
+	return cpu_assigned;
+}
+
 void rmnet_shs_ps_on_hdlr(void *port)
 {
 	rmnet_shs_wq_pause();
@@ -240,19 +429,6 @@ void rmnet_shs_ps_on_hdlr(void *port)
 void rmnet_shs_ps_off_hdlr(void *port)
 {
 	rmnet_shs_wq_restart();
-}
-
-u8 rmnet_shs_get_online_mask(void)
-{
-	u8 mask = 0;
-	int i;
-
-	/* Find idx by counting all other configed CPUs*/
-	for (i = 0; i < MAX_CPUS; i++) {
-		if (cpu_online(i))
-			mask |= 1 << i;
-	}
-	return mask;
 }
 
 u8 rmnet_shs_mask_from_map(struct rps_map *map)
@@ -301,6 +477,33 @@ int rmnet_shs_idx_from_cpu(u8 cpu, u8 mask)
 			idx++;
 	}
 	return ret;
+}
+
+/* Assigns a CPU to process packets corresponding to new flow. For flow with
+ * small incoming burst a low power core handling least number of packets
+ * per second will be assigned.
+ *
+ * For a flow with a heavy incoming burst, a performance core with the least
+ * number of packets processed per second  will be assigned
+ *
+ * If two or more cores within a cluster are handling the same number of
+ * packets per second, the first match will be assigned.
+ */
+int rmnet_shs_new_flow_cpu(u64 burst_size, struct net_device *dev)
+{
+	int flow_cpu = INVALID_CPU;
+
+	if (burst_size < RMNET_SHS_MAX_SILVER_CORE_BURST_CAPACITY)
+		flow_cpu = rmnet_shs_wq_get_lpwr_cpu_new_flow(dev);
+	if (flow_cpu == INVALID_CPU ||
+	    burst_size >= RMNET_SHS_MAX_SILVER_CORE_BURST_CAPACITY)
+		flow_cpu = rmnet_shs_wq_get_perf_cpu_new_flow(dev);
+
+	SHS_TRACE_HIGH(RMNET_SHS_ASSIGN,
+			     RMNET_SHS_ASSIGN_GET_NEW_FLOW_CPU,
+			     flow_cpu, burst_size, 0xDEF, 0xDEF, NULL, NULL);
+
+	return flow_cpu;
 }
 
 void *rmnet_shs_header_ptr(struct sk_buff *skb, u32 offset, u32 hlen,
@@ -364,7 +567,6 @@ void rmnet_shs_get_update_skb_hdr_info(struct sk_buff *skb,
 			return;
 
 		node_p->skb_tport_proto = ip4h->protocol;
-		node_p->ip_fam = SHSUSR_IPV4;
 		memcpy(&(node_p->ip_hdr.v4hdr), ip4h, sizeof(*ip4h));
 
 		ip_len = ip4h->ihl * 4;
@@ -376,7 +578,6 @@ void rmnet_shs_get_update_skb_hdr_info(struct sk_buff *skb,
 			return;
 
 		node_p->skb_tport_proto = ip6h->nexthdr;
-		node_p->ip_fam = SHSUSR_IPV6;
 		memcpy(&(node_p->ip_hdr.v6hdr), ip6h, sizeof(*ip6h));
 
 		protocol = ip6h->nexthdr;
@@ -417,55 +618,6 @@ void rmnet_shs_get_update_skb_hdr_info(struct sk_buff *skb,
 
 }
 
-static u8 rmnet_shs_get_skb_dsfield(struct sk_buff *skb)
-{
-	/* It's tempting to use the inet_ecn helpers for this, but as those
-	 * rely on skb->network_header being set and stuff being linear
-	 * (which might not be the case depending on the path this SKB took...)
-	 * we err on the safe side.
-	 */
-	switch (skb->protocol) {
-	case __cpu_to_be16(ETH_P_IP):
-	{
-		struct iphdr *iph, __iph;
-
-		iph = rmnet_shs_header_ptr(skb, 0, sizeof(*iph), &__iph);
-		if (!iph)
-			return 0;
-
-		return ipv4_get_dsfield(iph);
-	}
-	case __cpu_to_be16(ETH_P_IPV6):
-	{
-		struct ipv6hdr *ip6h, __ip6h;
-
-		ip6h = rmnet_shs_header_ptr(skb, 0, sizeof(*ip6h), &__ip6h);
-		if (!ip6h)
-			return 0;
-
-		return ipv6_get_dsfield(ip6h);
-	}
-	default:
-		return 0;
-	}
-}
-
-int rmnet_shs_is_skb_l4s(struct sk_buff *skb)
-{
-	u8 dsfield = rmnet_shs_get_skb_dsfield(skb);
-
-	/* L4S sets ECT(1) */
-	return !!((dsfield & 0x3) == 0x1);
-}
-
-int rmnet_shs_is_skb_ecn_capable(struct sk_buff *skb)
-{
-	u8 dsfield = rmnet_shs_get_skb_dsfield(skb);
-
-	/* Any non-zero value in the lower order bits means yes */
-	return !!(dsfield & 0x3);
-}
-
 /* Forms a new hash from the incoming hash based on the number of cores
  * available for processing. This new hash will be stamped by
  * SHS module (for all the packets arriving with same incoming hash)
@@ -495,20 +647,4 @@ u32 rmnet_shs_form_hash(u32 index, u32 maplen, u32 hash, u8 async)
 			    ret, hash, index, maplen, NULL, NULL);
 
 	return ret;
-}
-
-/* Delivers skb's to the next module */
-void rmnet_shs_deliver_skb(struct sk_buff *skb)
-{
-	SHS_TRACE_LOW(RMNET_SHS_DELIVER_SKB, RMNET_SHS_DELIVER_SKB_START,
-			    0xDEF, 0xDEF, 0xDEF, 0xDEF, skb, NULL);
-	netif_receive_skb(skb);
-}
-
-void rmnet_shs_deliver_skb_wq(struct sk_buff *skb)
-{
-
-	SHS_TRACE_LOW(RMNET_SHS_DELIVER_SKB, RMNET_SHS_DELIVER_SKB_START,
-			    0xDEF, 0xDEF, 0xDEF, 0xDEF, skb, NULL);
-	netif_rx(skb);
 }

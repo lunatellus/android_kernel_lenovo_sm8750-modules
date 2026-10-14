@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <net/sock.h>
@@ -18,8 +18,6 @@
 
 #include "rmnet_shs.h"
 #include "rmnet_shs_wq_genl.h"
-#include <uapi/linux/rmnet_shs.h>
-
 #include "rmnet_shs_config.h"
 #include "rmnet_shs_wq.h"
 #include "rmnet_shs_modules.h"
@@ -211,16 +209,8 @@ int ipv6_packet_match(struct sk_buff *skb, struct ipv6hdr *skb_ip6h, struct rmne
 	u8 protocol;
 	__be16 frag_off;
 
-	saddmatch = !info->src_addr_valid;
-	if (info->src_addr_valid)
-		saddmatch = !ipv6_masked_addr_cmp(&skb_ip6h->saddr, &info->src_ip_addr_mask.v6_mask,
-						  &info->src_ip_addr.v6_saddr);
-
-	daddmatch = !info->dest_addr_valid;
-	if (info->dest_addr_valid)
-		daddmatch = !ipv6_masked_addr_cmp(&skb_ip6h->daddr, &info->dest_ip_addr_mask.v6_mask,
-						  &info->dest_ip_addr.v6_daddr);
-
+	saddmatch = !info->src_addr_valid || ipv6_addr_equal(&skb_ip6h->saddr,  &info->src_ip_addr.v6_saddr);
+	daddmatch = !info->dest_addr_valid || ipv6_addr_equal(&skb_ip6h->daddr,  &info->dest_ip_addr.v6_daddr);
 	protomatch = !info->proto_valid || info->proto == skb_ip6h->nexthdr;
 
 	src_port_match = !info->src_port_valid ;
@@ -239,13 +229,8 @@ int ipv6_packet_match(struct sk_buff *skb, struct ipv6hdr *skb_ip6h, struct rmne
 				src_port_match = false;
 				dest_port_match = false;
 			} else {
-				if (info->src_port_valid)
-					src_port_match = ntohs(info->src_port) <= ntohs(tp->source) &&
-							 ntohs(tp->source) <= ntohs(info->src_port_max);
-
-				if (info->dest_port_valid)
-					dest_port_match = ntohs(info->dest_port) <= ntohs(tp->dest) &&
-							  ntohs(tp->dest) <= ntohs(info->dest_port_max);
+				src_port_match = !info->src_port_valid || tp->source ==  (info->src_port);
+				dest_port_match = !info->dest_port_valid || tp->dest ==  (info->dest_port);
 			}
 		} else if (skb_ip6h->nexthdr == IPPROTO_UDP) {
 			up = rmnet_shs_header_ptr(skb, v6len, sizeof(*up), &__up);
@@ -253,13 +238,8 @@ int ipv6_packet_match(struct sk_buff *skb, struct ipv6hdr *skb_ip6h, struct rmne
 				src_port_match = false;
 				dest_port_match = false;
 			} else {
-				if (info->src_port_valid)
-					src_port_match = ntohs(info->src_port) <= ntohs(up->source) &&
-							 ntohs(up->source) <= ntohs(info->dest_port_max);
-
-				if (info->dest_port_valid)
-					dest_port_match = ntohs(info->dest_port) <= ntohs(up->dest) &&
-							  ntohs(up->dest) <= ntohs(info->dest_port_max);
+				src_port_match = !info->src_port_valid || up->source ==  (info->src_port);
+				dest_port_match = !info->dest_port_valid ||  up->dest ==  (info->dest_port);
 			}
 		}
 	}
@@ -278,17 +258,11 @@ int ipv4_packet_match(struct sk_buff *skb, struct iphdr *skb_ip4h, struct rmnet_
 	struct udphdr *up, __up;
 	u16 v4ip_len = skb_ip4h->ihl * 4;
 
-	int saddmatch = !info->src_addr_valid;
-	int daddmatch = !info->dest_addr_valid;
+	int saddmatch = !info->src_addr_valid || skb_ip4h->saddr == info->src_ip_addr.saddr;
+	int daddmatch = !info->dest_addr_valid || skb_ip4h->daddr == (info->dest_ip_addr.daddr);
 	int protomatch = !info->proto_valid || skb_ip4h->protocol == info->proto;
 	int src_port_match = !info->src_port_valid ;
 	int dest_port_match = !info->dest_port_valid;
-
-	if (info->src_addr_valid)
-		saddmatch = !((skb_ip4h->saddr ^ info->src_ip_addr.saddr) & info->src_ip_addr_mask.mask);
-
-	if (info->dest_addr_valid)
-		daddmatch = !((skb_ip4h->daddr ^ info->dest_ip_addr.daddr) & info->dest_ip_addr_mask.mask);
 
 	if (info->src_port_valid || info->dest_port_valid) {
 		if (skb_ip4h->protocol == IPPROTO_TCP) {
@@ -297,13 +271,8 @@ int ipv4_packet_match(struct sk_buff *skb, struct iphdr *skb_ip4h, struct rmnet_
 				src_port_match = false;
 				dest_port_match = false;
 			} else {
-				if (info->src_port_valid)
-					src_port_match = ntohs(info->src_port) <= ntohs(tp->source) &&
-							 ntohs(tp->source) <= ntohs(info->src_port_max);
-
-				if (info->dest_port_valid)
-					dest_port_match = ntohs(info->dest_port) <= ntohs(tp->dest) &&
-							  ntohs(tp->dest) <= ntohs(info->dest_port_max);
+				src_port_match = !info->src_port_valid || tp->source ==  (info->src_port);
+				dest_port_match = !info->dest_port_valid || tp->dest ==  (info->dest_port);
 			}
 		} else if (skb_ip4h->protocol == IPPROTO_UDP) {
 			up = rmnet_shs_header_ptr(skb, v4ip_len, sizeof(*up), &__up);
@@ -311,13 +280,8 @@ int ipv4_packet_match(struct sk_buff *skb, struct iphdr *skb_ip4h, struct rmnet_
 				src_port_match = false;
 				dest_port_match = false;
 			} else {
-				if (info->src_port_valid)
-					src_port_match = ntohs(info->src_port) <= ntohs(up->source) &&
-							 ntohs(up->source) <= ntohs(info->src_port_max);
-
-				if (info->dest_port_valid)
-					dest_port_match = ntohs(info->dest_port) <= ntohs(up->dest) &&
-							  ntohs(up->dest) <= ntohs(info->dest_port_max);
+				src_port_match = !info->src_port_valid || up->source ==  (info->src_port);
+				dest_port_match = !info->dest_port_valid ||  up->dest ==  (info->dest_port);
 			}
 		}
 	}
@@ -342,72 +306,27 @@ int rmnet_shs_is_identical_filter(struct rmnet_shs_wq_flow_node  *node, struct r
 	if (info->seq && info2->seq && (info->seq == info2->seq)) {
 		return true;
 	}
-
 	/* Saddr matches between filters if both are not matchign for addr and/or address match*/
-	if (!info->src_addr_valid && !info2->src_addr_valid) {
-		saddmatch = 1;
-	} else if (info->src_addr_valid && info2->src_addr_valid) {
-		if (info->ip_version == 4) {
-			__be32 s1 = info->src_ip_addr.saddr & info->src_ip_addr_mask.mask;
-			__be32 s2 = info2->src_ip_addr.saddr & info2->src_ip_addr_mask.mask;
+	saddmatch = (!info->src_addr_valid  && !info2->src_addr_valid) ||
+		 (info->src_addr_valid  && info2->src_addr_valid &&
+		 (info->ip_version == 4)?(info->src_ip_addr.saddr == info2->src_ip_addr.saddr) :
+		 ipv6_addr_equal(&info2->src_ip_addr.v6_saddr, &info->src_ip_addr.v6_saddr));
 
-			saddmatch = s1 == s2;
-		} else {
-			struct in6_addr s1;
-			struct in6_addr s2;
-			int i;
-
-			for (i = 0; i < 4; i++) {
-				s1.s6_addr32[i] = info->src_ip_addr.v6_saddr.s6_addr32[i] &
-						  info->src_ip_addr_mask.v6_mask.s6_addr32[i];
-				s2.s6_addr32[i] = info2->src_ip_addr.v6_saddr.s6_addr32[i] &
-						  info2->src_ip_addr_mask.v6_mask.s6_addr32[i];
-			}
-
-			saddmatch = ipv6_addr_equal(&s1, &s2);
-		}
-	} else {
-		saddmatch = 0;
-	}
-
-	if (!info->dest_addr_valid && !info2->dest_addr_valid) {
-		daddmatch = 1;
-	} else if (info->dest_addr_valid && info2->dest_addr_valid) {
-		if (info->ip_version == 4) {
-			__be32 d1 = info->dest_ip_addr.daddr & info->dest_ip_addr_mask.mask;
-			__be32 d2 = info2->dest_ip_addr.daddr & info2->dest_ip_addr_mask.mask;
-
-			daddmatch = d1 == d2;
-		} else {
-			struct in6_addr d1;
-			struct in6_addr d2;
-			int i;
-
-			for (i = 0; i < 4; i++) {
-				d1.s6_addr32[i] = info->dest_ip_addr.v6_daddr.s6_addr32[i] &
-						  info->dest_ip_addr_mask.v6_mask.s6_addr32[i];
-				d2.s6_addr32[i] = info2->dest_ip_addr.v6_daddr.s6_addr32[i] &
-						  info2->dest_ip_addr_mask.v6_mask.s6_addr32[i];
-			}
-
-			daddmatch = ipv6_addr_equal(&d1, &d2);
-		}
-	} else {
-		daddmatch = 0;
-	}
+	daddmatch = (!info->dest_addr_valid  && !info2->dest_addr_valid) ||
+		(info->dest_addr_valid  && info2->dest_addr_valid &&
+		(info->ip_version == 4)?(info->dest_ip_addr.daddr == info2->dest_ip_addr.daddr) :
+		ipv6_addr_equal(&info2->dest_ip_addr.v6_daddr, &info->dest_ip_addr.v6_daddr));
 
 	protomatch = (!info->proto_valid  && !info2->proto_valid) ||
 					(info->proto_valid  && info2->proto_valid && info->proto == info2->proto);
 
 	src_port_match = (!info->src_port_valid  && !info2->src_port_valid) ||
 					(info->src_port_valid  && info2->src_port_valid &&
-					info->src_port == info2->src_port &&
-					info->src_port_max == info2->src_port_max);
+					info->src_port == info2->src_port);
 
 	dest_port_match = (!info->dest_port_valid  && !info2->dest_port_valid) ||
 					(info->dest_port_valid  && info2->dest_port_valid &&
-					info->dest_port == info2->dest_port &&
-					info->dest_port_max == info2->dest_port_max);
+					info->dest_port == info2->dest_port);
 
 	rm_err("SHS_LL: match result sadr match %u daddr match %u, proto match %u, src port %u, dest port match %u  versionmatch %u\n",
            saddmatch, daddmatch, protomatch,src_port_match, dest_port_match, versionmatch);
@@ -470,32 +389,24 @@ void rmnet_shs_remove_llflow(struct rmnet_shs_wq_flow_node  *node)
 	struct hlist_node *tmp;
 	struct rmnet_shs_wq_hstat_s *hnode = NULL;
 	unsigned long bkt;
-	bool found = false;
+	int i = 0;
 
 	spin_lock_bh(&rmnet_shs_ll_ht_splock);
 	hash_for_each_safe(rmnet_shs_ll_filter_ht, bkt, tmp, temp_node, list)
 	{
+		i++;
 		if (rmnet_shs_is_identical_filter(temp_node, node)) {
 			rm_err("SHS_LL: %s\n", "Filter already installed, Dup Filter");
 			hash_del_rcu(&temp_node->list);
 			kfree(temp_node);
-			found = true;
 			break;
 		}
 	}
 	spin_unlock_bh(&rmnet_shs_ll_ht_splock);
 
-	if (!found) {
-		/* No matching filter was found. Just free our GENL node
-		 * and return.
-		 */
-		kfree(node);
-		return;
-	}
-
 	spin_lock_bh(&rmnet_shs_hstat_tbl_lock);
 	list_for_each_entry(hnode, &rmnet_shs_wq_hstat_tbl, hstat_node_id) {
-		if (hnode->node && hnode->node->low_latency != RMNET_SHS_TRUE_LOW_LATENCY) {
+		if (hnode->node && !hnode->node->low_latency) {
 			hnode->node->low_latency= RMNET_SHS_LOW_LATENCY_CHECK;
 		}
 	}
@@ -520,28 +431,25 @@ void rmnet_shs_print_llflow(struct rmnet_shs_wq_flow_node  *node)
 	pr_info("SHS_LL: info->proto %u\n", info->proto );
 	pr_info("SHS_LL: info->dest_port %u\n", info->dest_port );
 	pr_info("SHS_LL: info->src_port %u\n", info->src_port );
-	pr_info("SHS_LL: info->dest_port_max %u\n", info->dest_port_max);
-	pr_info("SHS_LL: info->src_port_max %u\n", info->src_port_max);
 	pr_info("SHS_LL: info->dest_addr_valid %u\n", info->dest_addr_valid);
 	pr_info("SHS_LL: info->src_addr_valid %u\n", info->src_addr_valid);
 	pr_info("SHS_LL: info->seq %u\n", info->seq);
 
 	if (info->ip_version == 4 && (info->dest_addr_valid) && (info->src_addr_valid )) {
-		pr_info("New flow info->dest_addr %pI4/%pI4\n",
-			&info->dest_ip_addr.daddr,
-			&info->dest_ip_addr_mask.mask);
-		pr_info("New flow info->src_addr %pI4/%pI4\n",
-			&info->src_ip_addr.saddr,
-			&info->src_ip_addr_mask.mask);
+		pr_info("New flow info->dest_addr_valid %u\n", info->dest_ip_addr.daddr);
+		pr_info("New flow info->src_addr_valid %u\n",  info->src_ip_addr.saddr);
 	}
-
 	if (info->ip_version == 6 && (info->dest_addr_valid) && (info->src_addr_valid )) {
-		pr_info("New flow info->dest_addr %pI6/%pI6\n",
-			&node->info.dest_ip_addr.v6_daddr,
-			&node->info.dest_ip_addr_mask.v6_mask);
-		pr_info("New flow info->src_addr %pI6/%pI6\n",
-			&node->info.src_ip_addr.v6_saddr,
-			&node->info.src_ip_addr_mask.v6_mask);
+		pr_info("New flow info->dest_addr_valid %u %u %u %u\n",
+                node->info.dest_ip_addr.v6_daddr.in6_u.u6_addr32[3],
+                node->info.dest_ip_addr.v6_daddr.in6_u.u6_addr32[2],
+                node->info.dest_ip_addr.v6_daddr.in6_u.u6_addr32[1],
+                node->info.dest_ip_addr.v6_daddr.in6_u.u6_addr32[0]);
+		pr_info("New flow info->src_addr_valid  %u %u %u %u\n",
+                node->info.src_ip_addr.v6_saddr.in6_u.u6_addr32[3],
+                node->info.src_ip_addr.v6_saddr.in6_u.u6_addr32[2],
+                node->info.src_ip_addr.v6_saddr.in6_u.u6_addr32[1],
+                node->info.src_ip_addr.v6_saddr.in6_u.u6_addr32[0]);
 	}
 }
 
@@ -585,8 +493,8 @@ void rmnet_shs_add_llflow(struct rmnet_shs_wq_flow_node  *node)
 	rm_err("SHS_LL: %s\n", "Setting low latency flow check for all flows");
 	spin_lock_bh(&rmnet_shs_hstat_tbl_lock);
 	list_for_each_entry(hnode, &rmnet_shs_wq_hstat_tbl, hstat_node_id) {
-		if (hnode->node && hnode->node->low_latency != RMNET_SHS_TRUE_LOW_LATENCY) {
-			hnode->node->low_latency = RMNET_SHS_LOW_LATENCY_CHECK;
+		if (hnode->node && !hnode->node->low_latency) {
+			hnode->node->low_latency= RMNET_SHS_LOW_LATENCY_CHECK;
 		}
 
 	}
@@ -631,7 +539,7 @@ int rmnet_shs_ll_handler(struct sk_buff *skb, struct rmnet_shs_clnt_s *clnt_cfg)
 
 	rmnet_shs_ll_pkts++;
 
-	hash = skb_get_hash(skb) ^ RMNET_SHS_TRUE_LOW_LATENCY;
+	hash = skb_get_hash(skb);
 	/*deliver non TCP/UDP packets right away*/
 	/* If stmp all is set break and don't check reqd */
 	if (!(clnt_cfg->config & RMNET_SHS_STMP_ALL) &&
@@ -645,10 +553,13 @@ int rmnet_shs_ll_handler(struct sk_buff *skb, struct rmnet_shs_clnt_s *clnt_cfg)
 
 		hash_for_each_possible_safe(rmnet_shs_ll_ht, node_p, tmp, list,
 					    hash) {
+
 			if (hash != node_p->hash)
 				continue;
 			is_match_found = 1;
+
 			node_p->map_cpu = rmnet_shs_ll_flow_cpu;
+
 			node_p->map_index = rmnet_shs_idx_from_cpu(node_p->map_cpu, map);
 			break;
 		}
@@ -677,17 +588,16 @@ int rmnet_shs_ll_handler(struct sk_buff *skb, struct rmnet_shs_clnt_s *clnt_cfg)
 		node_p->custom_map = clnt_cfg->map_mask;
 		node_p->custom_len = rmnet_shs_cfg.map_mask;
 		node_p->dev = skb->dev;
-		node_p->hash = skb->hash ^ RMNET_SHS_TRUE_LOW_LATENCY;
+		node_p->hash = skb->hash;
 		node_p->map_cpu = ll_cpu;
-		node_p->low_latency = RMNET_SHS_TRUE_LOW_LATENCY;
+		node_p->low_latency = 1;
 		node_p->map_index = rmnet_shs_idx_from_cpu(node_p->map_cpu, map);
 		node_p->map_cpu = raw_smp_processor_id();
+		node_p->map_index = rmnet_shs_idx_from_cpu(node_p->map_cpu, map);
 
 		INIT_LIST_HEAD(&node_p->node_id);
 		/* Set ip header / transport header / transport proto */
 		rmnet_shs_get_update_skb_hdr_info(skb, node_p);
-		node_p->l4s = rmnet_shs_is_skb_l4s(skb);
-		node_p->ecn_capable = rmnet_shs_is_skb_ecn_capable(skb);
 		/* Workqueue utilizes some of the values from above
 		 * initializations . Therefore, we need to request
 		 * for memory (to workqueue) after the above initializations
@@ -706,7 +616,7 @@ int rmnet_shs_ll_handler(struct sk_buff *skb, struct rmnet_shs_clnt_s *clnt_cfg)
 			       node_p->hash, node_p->hstats->mux_id);
 		}
 		rmnet_shs_cpu_node_add(node_p, &cpu_node_tbl_p->node_list_id);
-		hash_add_rcu(rmnet_shs_ll_ht, &node_p->list, node_p->hash);
+		hash_add_rcu(rmnet_shs_ll_ht, &node_p->list, skb->hash);
 		is_match_found = 1;
 		break;
 
@@ -725,7 +635,8 @@ int rmnet_shs_ll_handler(struct sk_buff *skb, struct rmnet_shs_clnt_s *clnt_cfg)
 		rmnet_shs_ll_stamp(skb, node_p);
 		if (!node_p->ll_flag &&
 		    rmnet_shs_is_lpwr_cpu(raw_smp_processor_id()))  {
-			if (GET_QLEN(raw_smp_processor_id()) <  MAX_LL_CORE_BACKLOG ) {
+			if (GET_QLEN(raw_smp_processor_id()) <  MAX_LL_CORE_BACKLOG &&
+			    rmnet_shs_cpu_psb_above_thresh(raw_smp_processor_id(), 4000)) {
 				skb->hash = 0;
 				skb->sw_hash = 1;
 			} else if (!node_p->ll_flag) {
@@ -735,7 +646,8 @@ int rmnet_shs_ll_handler(struct sk_buff *skb, struct rmnet_shs_clnt_s *clnt_cfg)
 			}
 		} else if (node_p->ll_flag != RMNET_SHS_LL_SAME_CORE_GOLD){
 			if (!rmnet_shs_is_lpwr_cpu(raw_smp_processor_id()))  {
-				if (GET_QLEN(raw_smp_processor_id()) < MAX_LL_CORE_BACKLOG) {
+				if (GET_QLEN(raw_smp_processor_id()) < MAX_LL_CORE_BACKLOG &&
+				    rmnet_shs_cpu_psb_above_thresh(raw_smp_processor_id(), 12000)) {
 				skb->hash = 0;
 				skb->sw_hash = 1;
 
@@ -749,21 +661,18 @@ int rmnet_shs_ll_handler(struct sk_buff *skb, struct rmnet_shs_clnt_s *clnt_cfg)
 
 		if (skb_shinfo(skb)->gso_segs) {
 			node_p->num_skb += skb_shinfo(skb)->gso_segs;
+			rmnet_shs_cpu_node_tbl[node_p->map_cpu].parkedlen++;
+			node_p->skb_list.skb_load += skb_shinfo(skb)->gso_segs;
 		} else {
 			node_p->num_skb += 1;
+			rmnet_shs_cpu_node_tbl[node_p->map_cpu].parkedlen++;
+			node_p->skb_list.skb_load++;
 		}
 		node_p->num_coal_skb += 1;
 		node_p->hw_coal_bytes += RMNET_SKB_CB(skb)->coal_bytes;
 		node_p->hw_coal_bufsize += RMNET_SKB_CB(skb)->coal_bufsize;
 		if (skb->priority == 0xda1a)
 			node_p->num_ll_skb++;
-
-		if (!node_p->l4s)
-			node_p->l4s = rmnet_shs_is_skb_l4s(skb);
-
-		if (!node_p->ecn_capable)
-			node_p->ecn_capable = rmnet_shs_is_skb_ecn_capable(skb);
-
 		node_p->num_skb_bytes += skb->len;
 	}
 
@@ -787,12 +696,17 @@ void rmnet_shs_ll_deinit(void)
 
 	rm_err("%s", "SHS_LL: De-init LL book-keeping");
 	spin_lock_bh(&rmnet_shs_ll_ht_splock);
+	hash_for_each_safe(rmnet_shs_ll_ht, bkt, tmp, node, list)
+	{
+		hash_del_rcu(&node->list);
+	}
+
 	hash_for_each_safe(rmnet_shs_ll_filter_ht, bkt, tmp, node, list)
 	{
 		hash_del_rcu(&node->list);
 		kfree(node);
-	        rmnet_shs_cfg.num_filters--;
-		rmnet_shs_filter_count--;
+        rmnet_shs_cfg.num_filters--;
+        rmnet_shs_filter_count--;
 	}
 	spin_unlock_bh(&rmnet_shs_ll_ht_splock);
 	rm_err("%s", "SHS_LL: De-init LL book-keeping exit");
