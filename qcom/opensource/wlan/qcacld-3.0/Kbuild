@@ -6,6 +6,9 @@ else
 	KERNEL_BUILD := n
 endif
 
+# Match the production WLAN configuration shipped on elden.
+TARGET_BUILD_VARIANT := user
+
 ifeq ($(KERNEL_BUILD), y)
 	# These are provided in external module based builds
 	# Need to explicitly define for Kernel-based builds
@@ -24,7 +27,7 @@ WLAN_PROFILE ?= default
 CONFIG_QCA_CLD_WLAN_PROFILE ?= $(WLAN_PROFILE)
 DEVNAME ?= wlan
 WLAN_PLATFORM_INC ?= $(WLAN_ROOT)/../platform/inc
-DATA_IPA_INC ?= $(WLAN_ROOT)/../dataipa/drivers/platform/msm/include
+DATA_IPA_INC ?= $(WLAN_ROOT)/../../dataipa/drivers/platform/msm/include
 DATA_IPA_UAPI_INC ?= $(DATA_IPA_INC)/uapi
 
 ifeq ($(KERNEL_BUILD), n)
@@ -43,7 +46,21 @@ else ifneq ($(LINUX_BUILD_TOP),)
 endif
 endif
 
+WLAN_PLATFORM_ROOT := $(WLAN_ROOT)/../platform
+include \
+	$(WLAN_PLATFORM_ROOT)/cnss2/sun_gki_defconfig \
+	$(WLAN_PLATFORM_ROOT)/cnss_genl/sun_gki_defconfig \
+	$(WLAN_PLATFORM_ROOT)/cnss_prealloc/sun_gki_defconfig \
+	$(WLAN_PLATFORM_ROOT)/cnss_utils/sun_gki_defconfig \
+	$(WLAN_PLATFORM_ROOT)/icnss2/sun_gki_defconfig
+
 include $(WLAN_ROOT)/configs/$(CONFIG_QCA_CLD_WLAN_PROFILE)_defconfig
+
+# Kbuild reads the profile directly without resolving Kconfig selects.
+# Multi-chip variants must not export duplicate driver symbols.
+ifeq ($(CONFIG_WLAN_MULTI_CHIP_SUPPORT), y)
+CONFIG_WLAN_DISABLE_EXPORT_SYMBOL := y
+endif
 
 # add configurations in WLAN_CFG_OVERRIDE
 $(foreach cfg, $(WLAN_CFG_OVERRIDE), \
@@ -1294,7 +1311,8 @@ FTM_OBJS := $(FTM_DISP_SRC)/wlan_ftm_init_deinit.o \
 	    $(FTM_CORE_SRC)/wlan_ftm_svc.o \
 	    $(TARGET_IF_FTM_SRC)/target_if_ftm.o
 
-ifeq ($(QCA_WIFI_FTM_NL80211), y)
+# Keep the object selection in sync with QCA_WIFI_FTM_NL80211 below.
+ifneq ($(filter y,$(CONFIG_QCA_WIFI_FTM_NL80211) $(CONFIG_NL80211_TESTMODE)),)
 FTM_OBJS += $(OS_IF_FTM_SRC)/wlan_cfg80211_ftm.o
 endif
 
@@ -3487,6 +3505,8 @@ INCS +=		$(COAP_WMI_INC)
 ccflags-y += $(INCS)
 
 ccflags-y += -include $(WLAN_ROOT)/configs/default_config.h
+ccflags-y += -include $(WLAN_ROOT)/../../dataipa/config/dataipa_vendor.h
+ccflags-y += -D__ANDROID_COMMON_KERNEL__
 
 # CFG80211_MLO_KEY_OPERATION_SUPPORT
 # Used to indicate the Linux Kernel contains support for ML key operation
@@ -4006,9 +4026,9 @@ ccflags-$(CONFIG_DEBUG_RX_RING_BUFFER) += -DDEBUG_RX_RING_BUFFER
 
 ccflags-$(CONFIG_DESC_TIMESTAMP_DEBUG_INFO) += -DDESC_TIMESTAMP_DEBUG_INFO
 
-ccflags-$(PANIC_ON_BUG) += -DPANIC_ON_BUG
+ccflags-$(CONFIG_PANIC_ON_BUG) += -DPANIC_ON_BUG
 
-ccflags-$(WLAN_WARN_ON_ASSERT) += -DWLAN_WARN_ON_ASSERT
+ccflags-$(CONFIG_WLAN_WARN_ON_ASSERT) += -DWLAN_WARN_ON_ASSERT
 
 ccflags-$(CONFIG_POWER_MANAGEMENT_OFFLOAD) += -DWLAN_POWER_MANAGEMENT_OFFLOAD
 
@@ -4019,7 +4039,7 @@ ccflags-$(CONFIG_WLAN_LOG_INFO) += -DWLAN_LOG_INFO
 ccflags-$(CONFIG_WLAN_LOG_DEBUG) += -DWLAN_LOG_DEBUG
 ccflags-$(CONFIG_WLAN_LOG_ENTER) += -DWLAN_LOG_ENTER
 ccflags-$(CONFIG_WLAN_LOG_EXIT) += -DWLAN_LOG_EXIT
-ccflags-$(WLAN_OPEN_SOURCE) += -DWLAN_OPEN_SOURCE
+ccflags-$(CONFIG_WLAN_OPEN_SOURCE) += -DWLAN_OPEN_SOURCE
 ccflags-$(CONFIG_FEATURE_STATS_EXT) += -DWLAN_FEATURE_STATS_EXT
 ccflags-$(CONFIG_QCACLD_FEATURE_NAN) += -DWLAN_FEATURE_NAN
 ccflags-$(CONFIG_QCACLD_FEATURE_SON) += -DWLAN_FEATURE_SON
@@ -4068,7 +4088,7 @@ ccflags-$(CONFIG_REMOVE_PKT_LOG) += -DREMOVE_PKT_LOG
 ccflags-$(CONFIG_ATH_11AC_TXCOMPACT) += -DATH_11AC_TXCOMPACT
 
 #ENABLE HTT HTC tx completion
-ccflags-$(ENABLE_CE4_COMP_DISABLE_HTT_HTC_MISC_LIST) += -DENABLE_CE4_COMP_DISABLE_HTT_HTC_MISC_LIST
+ccflags-$(CONFIG_ENABLE_CE4_COMP_DISABLE_HTT_HTC_MISC_LIST) += -DENABLE_CE4_COMP_DISABLE_HTT_HTC_MISC_LIST
 
 #Enable PCI specific APIS (dma, etc)
 ccflags-$(CONFIG_HIF_PCI) += -DHIF_PCI
@@ -4208,7 +4228,9 @@ ccflags-$(CONFIG_TX_CREDIT_RECLAIM_SUPPORT) += -DTX_CREDIT_RECLAIM_SUPPORT
 
 #Enable FTM support
 ccflags-$(CONFIG_QCA_WIFI_FTM) += -DQCA_WIFI_FTM
-ccflags-$(CONFIG_NL80211_TESTMODE) += -DQCA_WIFI_FTM_NL80211
+ifneq ($(filter y,$(CONFIG_QCA_WIFI_FTM_NL80211) $(CONFIG_NL80211_TESTMODE)),)
+ccflags-y += -DQCA_WIFI_FTM_NL80211
+endif
 ccflags-$(CONFIG_LINUX_QCMBR) += -DLINUX_QCMBR -DQCA_WIFI_FTM_IOCTL
 
 #Enable Checksum Offload support
@@ -5248,40 +5270,11 @@ ccflags-y += -Wmissing-prototypes
 ifeq ($(call cc-option-yn, -Wheader-guard), y)
 ccflags-y += -Wheader-guard
 endif
-# If the module name is not "wlan", then the define MULTI_IF_NAME to be the
-# same a the QCA CHIP name. The host driver will then append MULTI_IF_NAME to
-# any string that must be unique for all instances of the driver on the system.
-# This allows multiple instances of the driver with different module names.
-# If the module name is wlan, leave MULTI_IF_NAME undefined and the code will
-# treat the driver as the primary driver.
-#
-# If DYNAMIC_SINGLE_CHIP is defined and MULTI_IF_NAME is undefined, which means
-# there are multiple possible drivers, but only 1 driver will be loaded at
-# a time(WLAN dynamic detect), no matter what the module name is, then
-# host driver will only append DYNAMIC_SINGLE_CHIP to the path of
-# firmware/mac/ini file.
-#
-# If DYNAMIC_SINGLE_CHIP & MULTI_IF_NAME defined, which means there are
-# multiple possible drivers, we also can load multiple drivers together.
-# And we can use DYNAMIC_SINGLE_CHIP to distinguish the ko name, and use
-# MULTI_IF_NAME to make cnss2 platform driver to figure out which wlanhost
-# driver attached. Moreover, as the first priority, host driver will only
-# append DYNAMIC_SINGLE_CHIP to the path of firmware/mac/ini file.
+# Use the per-chip interface namespace from the selected profile, as DDK does.
 
-ifneq ($(DYNAMIC_SINGLE_CHIP),)
-ccflags-y += -DDYNAMIC_SINGLE_CHIP=\"$(DYNAMIC_SINGLE_CHIP)\"
-ifneq ($(MULTI_IF_NAME),)
-ccflags-y += -DMULTI_IF_NAME=\"$(MULTI_IF_NAME)\"
+ifneq ($(CONFIG_MULTI_IF_NAME),)
+ccflags-y += -DMULTI_IF_NAME=\"$(CONFIG_MULTI_IF_NAME)\"
 endif
-#
-else
-
-ifneq ($(MODNAME), wlan)
-CHIP_NAME ?= $(MODNAME)
-ccflags-y += -DMULTI_IF_NAME=\"$(CHIP_NAME)\"
-endif
-
-endif #DYNAMIC_SINGLE_CHIP
 
 # WLAN_HDD_ADAPTER_MAGIC must be unique for all instances of the driver on the
 # system. If it is not defined, then the host driver will use the first 4
@@ -5299,8 +5292,8 @@ else
 endif
 
 # Android wifi state control interface
-ifneq ($(WLAN_CTRL_NAME),)
-ccflags-y += -DWLAN_CTRL_NAME=\"$(WLAN_CTRL_NAME)\"
+ifneq ($(CONFIG_WLAN_CTRL_NAME),)
+ccflags-y += -DWLAN_CTRL_NAME=\"$(CONFIG_WLAN_CTRL_NAME)\"
 endif
 
 # inject some build related information
@@ -5325,6 +5318,10 @@ endif
 ifeq ($(CONFIG_ARCH_PINEAPPLE), y)
 ccflags-y += -gdwarf-4
 endif
+
+ccflags-$(CONFIG_CNSS_PEACH_V2) += -DQCA_WIFI_PEACH_V2
+ccflags-$(CONFIG_FEATURE_EPM) += -DFEATURE_EPM
+ccflags-$(CONFIG_IPA_OPT_WIFI_DP_CTRL) += -DIPA_OPT_WIFI_DP_CTRL
 
 # Module information used by KBuild framework
 obj-$(CONFIG_QCA_CLD_WLAN) += $(MODNAME).o
