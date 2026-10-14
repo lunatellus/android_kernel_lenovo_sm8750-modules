@@ -1281,7 +1281,7 @@ static int ipa3_usb_request_xdci_channel(
 	chan_params.evt_scratch.xdci.gevntcount_hi_addr =
 		params->gevntcount_hi_addr;
 	chan_params.chan_params.prot = GSI_CHAN_PROT_XDCI;
-	chan_params.chan_params.dir = (enum gsi_chan_dir)(params->dir);
+	chan_params.chan_params.dir = params->dir;
 	/* chan_id is set in ipa3_request_gsi_channel() */
 	chan_params.chan_params.re_size = GSI_CHAN_RE_SIZE_16B;
 	chan_params.chan_params.ring_len = params->xfer_ring_len;
