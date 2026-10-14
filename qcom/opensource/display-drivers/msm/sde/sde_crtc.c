@@ -61,6 +61,7 @@
 #include "hfi_crtc.h"
 #include "hfi_kms.h"
 #include "hfi_commands_display.h"
+#include "sde_drm_compat.h"
 
 #define SDE_PSTATES_MAX (SDE_STAGE_MAX * 4)
 #define SDE_MULTIRECT_PLANE_MAX (SDE_STAGE_MAX * 2)
@@ -4166,8 +4167,8 @@ static int _sde_crtc_set_dest_scaler(struct sde_crtc *sde_crtc,
 			scaler_v2_usr =
 			(void __user *)((uintptr_t)ds_cfg_usr->scaler_cfg);
 
-			if (copy_from_user(&scaler_v2, scaler_v2_usr,
-					sizeof(scaler_v2))) {
+			if (sde_drm_copy_scaler_v2(&scaler_v2, scaler_v2_usr,
+					get_kms(&sde_crtc->base)->catalog->qseed_hw_rev)) {
 				SDE_ERROR("%s:scaler: copy from user failed\n",
 					sde_crtc->name);
 				return -EINVAL;

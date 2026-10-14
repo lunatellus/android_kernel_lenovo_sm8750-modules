@@ -44,6 +44,7 @@
 #include "hfi_commands_display.h"
 #include "hfi_plane.h"
 #include "hfi_properties_display.h"
+#include "sde_drm_compat.h"
 
 #define SDE_DEBUG_PLANE(pl, fmt, ...) SDE_DEBUG("plane%d " fmt,\
 		(pl) ? (pl)->base.base.id : -1, ##__VA_ARGS__)
@@ -5102,7 +5103,8 @@ static inline void _sde_plane_set_scaler_v2(struct sde_plane *psde,
 		goto end;
 	}
 
-	if (copy_from_user(&scale_v2, usr, sizeof(scale_v2))) {
+	if (sde_drm_copy_scaler_v2(&scale_v2, usr,
+			psde->pipe_sblk->scaler_blk.version)) {
 		SDE_ERROR_PLANE(psde, "failed to copy scale data\n");
 		return;
 	}

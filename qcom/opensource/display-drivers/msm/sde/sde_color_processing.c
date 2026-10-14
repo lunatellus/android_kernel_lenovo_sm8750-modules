@@ -27,6 +27,7 @@
 #include "sde_aiqe_common.h"
 #include "hfi_properties_display.h"
 #include "hfi_crtc.h"
+#include "sde_drm_compat.h"
 
 #define ALIGNED_OFFSET (U32_MAX & ~(LTM_GUARD_BYTES))
 
@@ -1428,6 +1429,7 @@ static int _sde_cp_crtc_cache_blob_property(struct drm_crtc *crtc,
 					       uint64_t val)
 {
 	struct drm_property_blob *blob = NULL;
+	int ret = 0;
 
 	if (!val) {
 		if (prop_node->blob_ptr)
@@ -1446,6 +1448,24 @@ static int _sde_cp_crtc_cache_blob_property(struct drm_crtc *crtc,
 	if (!blob) {
 		DRM_ERROR("invalid blob id %lld feature %d\n", val, prop_node->feature);
 		return -EINVAL;
+	}
+	switch (prop_node->feature) {
+	case SDE_CP_CRTC_DSPP_SPR_DITHER:
+		ret = sde_drm_compat_blob(crtc->dev, &blob,
+			sizeof(struct drm_msm_dither), SDE_DITHER_LEGACY_SIZE,
+			SDE_DITHER_LEGACY_PREFIX);
+		break;
+	case SDE_CP_CRTC_DSPP_DEMURA_INIT:
+		ret = sde_drm_compat_blob(crtc->dev, &blob,
+			sizeof(struct drm_msm_dem_cfg), SDE_DEMURA_LEGACY_SIZE,
+			SDE_DEMURA_LEGACY_PREFIX);
+		break;
+	default:
+		break;
+	}
+	if (ret) {
+		drm_property_blob_put(blob);
+		return ret;
 	}
 	if (blob->length != prop_node->prop_blob_sz) {
 		DRM_ERROR("invalid blob len %zd exp %d feature %d\n",
@@ -2535,7 +2555,7 @@ exit:
 }
 
 static int _sde_cp_crtc_set_range_prop(
-		struct sde_crtc_state *cstate,
+		struct drm_crtc *crtc, struct sde_crtc_state *cstate,
 		struct sde_cp_node *prop_node,
 		struct drm_property *property, u32 feature, uint64_t val)
 {
@@ -2554,8 +2574,14 @@ static int _sde_cp_crtc_set_range_prop(
 		if (!cstate->cp_range_payload[feature].addr)
 			return -ENOMEM;
 	}
-	ret = copy_from_user((u8 *)(cstate->cp_range_payload[feature].addr),
-		u64_to_user_ptr(val), cstate->cp_range_payload[feature].len);
+	if (feature == SDE_CP_CRTC_DSPP_MDNIE)
+		ret = sde_drm_copy_mdnie(
+			(void *)cstate->cp_range_payload[feature].addr,
+			u64_to_user_ptr(val),
+			get_kms(crtc)->catalog->dspp[0].sblk->aiqe.version >> 16);
+	else
+		ret = copy_from_user((void *)cstate->cp_range_payload[feature].addr,
+			u64_to_user_ptr(val), cstate->cp_range_payload[feature].len);
 	if (ret) {
 		DRM_ERROR("failed to get the property info ret %d", ret);
 		kfree((void *)cstate->cp_range_payload[feature].addr);
@@ -2659,7 +2685,7 @@ int sde_cp_crtc_set_property(struct drm_crtc *crtc,
 	}
 	cstate->cp_prop_values[prop_node->feature].prop_val = val;
 	SDE_EVT32(prop_node->feature, val);
-	ret = _sde_cp_crtc_set_range_prop(cstate, prop_node,
+	ret = _sde_cp_crtc_set_range_prop(crtc, cstate, prop_node,
 				property,
 				prop_node->feature, val);
 	return ret;
