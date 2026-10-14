@@ -3700,6 +3700,8 @@ void cnss_recovery_handler(struct cnss_plat_data *plat_priv)
 
 	set_bit(CNSS_DRIVER_RECOVERY, &plat_priv->driver_state);
 
+	/* Lenovo stock: always recover WLAN instead of panicking the device. */
+	plat_priv->recovery_enabled = true;
 	if (!plat_priv->recovery_enabled)
 		panic("subsys-restart: Resetting the SoC wlan crashed\n");
 
