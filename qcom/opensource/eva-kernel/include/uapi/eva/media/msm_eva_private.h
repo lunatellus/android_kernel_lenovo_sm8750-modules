@@ -135,7 +135,15 @@ struct eva_kmd_client_data {
  * Structures and macros for KMD arg data
  */
 
+/*
+ * Sun ships the original, unversioned userspace ABI. This count also sets
+ * the fence and OOB offsets, not just the maximum HFI command length.
+ */
+#ifdef CONFIG_EVA_SUN
+#define	MAX_HFI_PKT_SIZE	490
+#else
 #define	MAX_HFI_PKT_SIZE	600
+#endif
 
 struct eva_kmd_hfi_packet {
 	__u32 pkt_data[MAX_HFI_PKT_SIZE];
