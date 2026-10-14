@@ -44,6 +44,13 @@ ddk_headers(
     name = "audio_headers",
     hdrs = [":audio_common_headers",  ":audio_uapi_headers", ":audio_src_headers", ":audio_configs"]
 )
+ddk_headers(
+    name = "aw882xx_headers",
+    hdrs = glob([
+        "asoc/codecs/aw882xx/inc/*.h"
+    ]),
+    includes = ["asoc/codecs/aw882xx/inc"]
+)
 
 load(":build/sun.bzl", "define_sun")
 load(":build/pineapple.bzl", "define_pineapple")

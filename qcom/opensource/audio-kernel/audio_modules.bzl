@@ -1,4 +1,4 @@
-load(":repo_paths.bzl", "modules_label")
+load(":repo_paths.bzl", "modules_label", "soc_label")
 load(":module_mgr.bzl", "create_module_registry")
 
 DSP_PATH = "dsp"
@@ -559,6 +559,7 @@ audio_modules.register(
             ":%b_wcd939x_slave_dlkm",
             ":%b_wcd9xxx_dlkm",
             ":%b_mbhc_dlkm",
+            soc_label("%t_%v/drivers/misc/hq/hqsysfs/hqsysfs"),
            ],
 )
 audio_modules.register(
@@ -567,6 +568,27 @@ audio_modules.register(
     config_option = "CONFIG_SND_SOC_WCD939X_SLAVE",
     srcs = ["wcd939x-slave.c"],
     deps = [":%b_swr_dlkm"],
+)
+# >>>> AW882XX MODULES <<<<
+audio_modules.register(
+    name = "aw882xx_dlkm",
+    path = ASOC_CODECS_PATH + "/aw882xx",
+    config_option = "CONFIG_SND_SOC_AW882XX",
+    srcs = [
+        "src/aw882xx_bin_parse.c",
+        "src/aw882xx_calib.c",
+        "src/aw882xx_device.c",
+        "src/aw882xx_dsp.c",
+        "src/aw882xx_init.c",
+        "src/aw882xx_monitor.c",
+        "src/aw882xx_spin.c",
+        "src/aw882xx.c",
+    ],
+    deps = [":aw882xx_headers",
+            soc_label("%t_%v/drivers/misc/hq/hqsysfs/hqsysfs"),
+    ],
+    local_defines = ["AW_AUDIOREACH_PLATFORM", "DEBUG"],
+    copts = ["-Wno-format-extra-args"],
 )
 # >>>> WCD9378 MODULES <<<<
 audio_modules.register(
