@@ -147,7 +147,6 @@ static int st54spi_gpio_dev_release(struct inode *inode, struct file *pfile)
 
 static const struct file_operations st54spi_gpio_dev_fops = {
 	.owner = THIS_MODULE,
-	.llseek = no_llseek,
 	.open = st54spi_gpio_dev_open,
 	.release = st54spi_gpio_dev_release,
 	.unlocked_ioctl = st54spi_gpio_dev_ioctl,
