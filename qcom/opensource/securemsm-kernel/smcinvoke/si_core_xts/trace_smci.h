@@ -234,7 +234,7 @@ TRACE_EVENT(cbo_dispatch_ret,
  */
 #undef TRACE_INCLUDE_PATH
 #define TRACE_INCLUDE_PATH \
-	../../../../vendor/qcom/sm8850-modules/qcom/opensource/securemsm-kernel/smcinvoke/si_core_xts
+	../../../../vendor/lenovo/sm8750-modules/qcom/opensource/securemsm-kernel/smcinvoke/si_core_xts
 #undef TRACE_INCLUDE_FILE
 #define TRACE_INCLUDE_FILE trace_smci
 

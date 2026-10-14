@@ -2,8 +2,8 @@
 
 """Paths relative to the main platform workspace."""
 
-SOC_REPO_PATH = "vendor/qcom/sm8850"
-SOC_MODULES_REPO_PATH = "vendor/qcom/sm8850-modules"
+SOC_REPO_PATH = "vendor/lenovo/sm8750"
+SOC_MODULES_REPO_PATH = "vendor/lenovo/sm8750-modules"
 
 def soc_label(target):
     """Return a label in the configured SoC kernel package."""

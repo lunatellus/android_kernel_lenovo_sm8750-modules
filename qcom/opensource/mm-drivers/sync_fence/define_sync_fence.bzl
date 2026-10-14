@@ -1,6 +1,6 @@
 load(":repo_paths.bzl", "modules_label", "soc_label")
 load("//build/kernel/kleaf:kernel.bzl", "ddk_module")
-load("//vendor/qcom/sm8850-modules/qcom/opensource/mm-drivers:target_variants.bzl", "get_all_variants")
+load("//vendor/lenovo/sm8750-modules/qcom/opensource/mm-drivers:target_variants.bzl", "get_all_variants")
 load("@rules_pkg//pkg:install.bzl", "pkg_install")
 load("@rules_pkg//pkg:mappings.bzl", "pkg_files", "strip_prefix")
 
