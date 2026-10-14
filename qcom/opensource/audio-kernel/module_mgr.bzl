@@ -77,6 +77,8 @@ def _define_target_modules(target, variant, registry, modules, product = None, c
         rule_name = "{}_{}".format(rule_prefix, module.name)
         srcs = _get_module_srcs(module, options)
         deps = headers + [dep_formatter(dep) for dep in module.deps]
+        for option, conditional_deps in module.conditional_deps.items():
+            deps.extend([dep_formatter(dep) for dep in conditional_deps.get(option in options, [])])
 
         if not srcs:
             continue
@@ -113,7 +115,7 @@ def _define_target_modules(target, variant, registry, modules, product = None, c
 def create_module_registry(hdrs = []):
     module_map = {}
 
-    def register(name, path = None, config_option = None, srcs = [], conditional_srcs = {}, deps = []):
+    def register(name, path = None, config_option = None, srcs = [], conditional_srcs = {}, deps = [], conditional_deps = {}):
         module_map[name] = struct(
             name = name,
             path = path,
@@ -121,6 +123,7 @@ def create_module_registry(hdrs = []):
             conditional_srcs = _create_module_conditional_src_map(conditional_srcs),
             config_option = config_option,
             deps = deps,
+            conditional_deps = _create_module_conditional_src_map(conditional_deps),
         )
 
     return struct(

@@ -227,8 +227,10 @@ audio_modules.register(
             ":%b_wsa884x_dlkm",
             ":%b_snd_event_dlkm",
             ":%b_wcd9378_dlkm",
-            ":%b_wcd937x_dlkm",
 	],
+    conditional_deps = {
+        "CONFIG_SND_SOC_WCD937X": [":%b_wcd937x_dlkm"],
+    },
 )
 # >>>> ASOC/CODEC MODULES <<<<
 audio_modules.register(
