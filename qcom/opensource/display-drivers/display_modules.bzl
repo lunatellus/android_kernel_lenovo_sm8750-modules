@@ -236,9 +236,6 @@ module_entry(
 
     # Configs are handled by config_options = []
     config_deps = {
-        "CONFIG_QCOM_FSA4480_I2C": [
-            soc_label("%b/drivers/soc/qcom/fsa4480_i2c"),
-        ],
         "CONFIG_HQ_SYSFS": [
             soc_label("%b/drivers/misc/hq/hqsysfs/hqsysfs"),
         ],
