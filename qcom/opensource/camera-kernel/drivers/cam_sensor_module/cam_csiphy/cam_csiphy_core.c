@@ -1212,6 +1212,21 @@ static int __cam_csiphy_handle_cdr_sweep_info(
 	return 0;
 }
 
+/*
+ * Older CamX uses two reserved params (24 bytes), and also emits the
+ * three-param payload without its trailing alignment padding (28 bytes).
+ * Only data_rate_aux_mask is consumed or updated; its offset is unchanged.
+ * Keep accepting the native 32-byte layout and its existing extensions.
+ */
+static bool cam_csiphy_aux_blob_size_valid(uint32_t blob_size)
+{
+	return blob_size == offsetof(struct cam_csiphy_aux_settings_params, params) +
+		2 * sizeof(__u32) ||
+		blob_size == offsetof(struct cam_csiphy_aux_settings_params, params) +
+		sizeof_field(struct cam_csiphy_aux_settings_params, params) ||
+		blob_size >= sizeof(struct cam_csiphy_aux_settings_params);
+}
+
 static int __cam_csiphy_handle_aux_mem_buffer(
 	struct csiphy_device                  *csiphy_dev,
 	struct cam_csiphy_aux_settings_params *aux_setting_params)
@@ -1306,7 +1321,7 @@ static int32_t cam_csiphy_generic_data_update(
 	case CAM_CSIPHY_GENERIC_BLOB_TYPE_AUX_CONFIG: {
 		struct cam_csiphy_aux_settings_params *aux_config_update;
 
-		if (blob_size < sizeof(struct cam_csiphy_aux_settings_params)) {
+		if (!cam_csiphy_aux_blob_size_valid(blob_size)) {
 			CAM_ERR(CAM_CSIPHY, "Invalid blob size %u, blob_type=%d for aux update",
 				blob_size, blob_type);
 			return -EINVAL;
@@ -1362,7 +1377,7 @@ static int32_t __cam_csiphy_generic_blob_handler(void *user_data,
 		struct cam_csiphy_aux_settings_params *aux_setting_params =
 			(struct cam_csiphy_aux_settings_params *)blob_data;
 
-		if (blob_size < sizeof(struct cam_csiphy_aux_settings_params)) {
+		if (!cam_csiphy_aux_blob_size_valid(blob_size)) {
 			CAM_ERR(CAM_CSIPHY, "Invalid blob size expected: 0x%x actual: 0x%x",
 				sizeof(struct cam_csiphy_aux_settings_params), blob_size);
 			return -EINVAL;
