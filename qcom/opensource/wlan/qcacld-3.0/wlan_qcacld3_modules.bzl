@@ -35,7 +35,6 @@ _target_chipset_map = {
         "kiwi-v2",
         "qca6750",
         "wcn7750",
-        "wcn7760",
     ],
     "volcano": [
         "qca6750",
