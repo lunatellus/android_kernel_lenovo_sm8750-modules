@@ -468,25 +468,26 @@ static int spss_handle_set_fw_and_apps_cmac(struct spss_ioc_set_fw_and_apps_cmac
 	void __user *cmac_buf_ptr = u64_to_user_ptr(req->cmac_buf_ptr);
 	u32 num_of_cmacs = req->num_of_cmacs;
 	/* Saved cmacs of spu firmware and UEFI loaded spu apps */
-	u32 fw_and_apps_cmacs[1+MAX_SPU_UEFI_APPS][CMAC_SIZE_IN_DWORDS];
+	u32 fw_and_apps_cmacs[1+MAX_SPU_UEFI_APPS][CMAC_SIZE_IN_DWORDS] = {};
 
 	pr_debug("cmac_buf_size [0x%x].\n", (int) req->cmac_buf_size);
 	pr_debug("cmac_buf_ptr  [0x%x].\n", (int) req->cmac_buf_ptr);
 	pr_debug("num_of_cmacs  [0x%x].\n", (int) req->num_of_cmacs);
 
-	if (cmac_buf_size != sizeof(fw_and_apps_cmacs)) {
+	/* The ioctl request is unchanged; only its pointed-to buffer grew. */
+	if (cmac_buf_size != 128 && cmac_buf_size != sizeof(fw_and_apps_cmacs)) {
 		pr_err("cmac_buf_size [0x%x] invalid.\n", cmac_buf_size);
 		return -EINVAL;
 	}
 
-	if (num_of_cmacs > (u32)(MAX_SPU_UEFI_APPS+1)) {
+	if (num_of_cmacs > cmac_buf_size / sizeof(fw_and_apps_cmacs[0])) {
 		pr_err("num_of_cmacs [0x%x] invalid.\n", num_of_cmacs);
 		return -EINVAL;
 	}
 
-	/* copy the saved cmacs from user buffer to loacl variable */
+	/* Zero-fill the eighth app CMAC when userspace uses the original ABI. */
 	ret = copy_from_user(fw_and_apps_cmacs, cmac_buf_ptr, cmac_buf_size);
-	if (ret < 0) {
+	if (ret) {
 		pr_err("copy_from_user() from cmac_buf_ptr failed.\n");
 		return -EFAULT;
 	}

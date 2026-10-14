@@ -94,7 +94,7 @@ struct spss_ioc_is_signaled {
 #define NUM_SPU_UEFI_APPS 4
 
 /* Max number of 3rd party UEFI applications */
-#define MAX_3RD_PARTY_UEFI_APPS 3
+#define MAX_3RD_PARTY_UEFI_APPS 4
 
 /* Max number of total UEFI applications */
 #define MAX_SPU_UEFI_APPS (NUM_SPU_UEFI_APPS + MAX_3RD_PARTY_UEFI_APPS)
@@ -103,8 +103,8 @@ struct spss_ioc_is_signaled {
 struct spss_ioc_set_fw_and_apps_cmac {
 	__u64	cmac_buf_ptr;
 	/*
-	 * expected cmac_buf_size is:
-	 * (1+MAX_SPU_UEFI_APPS)*CMAC_SIZE_IN_WORDS*sizeof(uint32_t)
+	 * Accepts 128 bytes from the original seven-app ABI, or
+	 * (1+MAX_SPU_UEFI_APPS)*CMAC_SIZE_IN_WORDS*sizeof(uint32_t).
 	 */
 	__u32	cmac_buf_size;
 	__u32	num_of_cmacs;
