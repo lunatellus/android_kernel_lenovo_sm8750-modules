@@ -1423,14 +1423,18 @@ static void sde_kms_prepare_commit(struct msm_kms *kms,
 	 * configuration only after completing preparation for secure
 	 * transitions prepare below if any transtions is required.
 	 */
+	SDE_ATRACE_BEGIN("sde_kms_prepare_secure_transition");
 	sde_kms_prepare_secure_transition(kms, state);
+	SDE_ATRACE_END("sde_kms_prepare_secure_transition");
 
 	vm_ops = sde_vm_get_ops(sde_kms);
 	if (!vm_ops)
 		goto end_vm;
 
+	SDE_ATRACE_BEGIN("vm_prepare_commit");
 	if (vm_ops->vm_prepare_commit)
 		vm_ops->vm_prepare_commit(sde_kms, state);
+	SDE_ATRACE_END("vm_prepare_commit");
 
 end_vm:
 	_sde_kms_drm_check_dpms(state, true);

@@ -2266,7 +2266,7 @@ static int dp_init_sub_modules(struct dp_display_private *dp)
 		dp->no_aux_switch = true;
 	}
 
-	if (!strcmp(dp->aux_switch_node->name, "fsa4480"))
+	if (!strcmp(dp->aux_switch_node->name, "fsa4480_i2c"))
 		dp->switch_type = DP_AUX_SWITCH_FSA4480;
 	else if (!strcmp(dp->aux_switch_node->name, "wcd939x_i2c"))
 		dp->switch_type = DP_AUX_SWITCH_WCD939x;

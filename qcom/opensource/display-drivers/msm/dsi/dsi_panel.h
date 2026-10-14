@@ -82,6 +82,16 @@ enum dsi_panel_physical_type {
 	DSI_DISPLAY_PANEL_TYPE_MAX,
 };
 
+struct dsi_dfps_timing {
+	u32 hbp;
+	u32 hsync;
+	u32 hfp;
+	u32 vbp;
+	u32 vsync;
+	u32 vfp;
+	u32 fps;
+};
+
 struct dsi_dfps_capabilities {
 	enum dsi_dfps_type type;
 	u32 min_refresh_rate;
@@ -89,6 +99,7 @@ struct dsi_dfps_capabilities {
 	u32 *dfps_list;
 	u32 dfps_list_len;
 	bool dfps_support;
+	struct dsi_dfps_timing *timings;
 };
 
 struct dsi_qsync_capabilities {
@@ -130,6 +141,8 @@ struct dsi_pinctrl_info {
 	struct pinctrl_state *active_with_esync_without_te;
 	struct pinctrl_state *suspend;
 	struct pinctrl_state *pwm_pin;
+	struct pinctrl_state *iovdd_enable;
+	struct pinctrl_state *iovdd_disable;
 };
 
 struct dsi_panel_phy_props {
@@ -421,6 +434,14 @@ int dsi_panel_unprepare(struct dsi_panel *panel);
 int dsi_panel_post_unprepare(struct dsi_panel *panel);
 
 int dsi_panel_set_backlight(struct dsi_panel *panel, u32 bl_lvl);
+void register_bl(void);
+void register_bias(void);
+int bias_enable(int enable);
+
+int bl_set_level(u32 bl_lvl);
+
+extern bool lcm_2k;
+void set_panel_id(const char *name);
 
 int dsi_panel_update_pps(struct dsi_panel *panel);
 
@@ -435,6 +456,9 @@ int dsi_panel_send_privacy_dcs(struct dsi_panel *panel, int ctrl_idx,
 		struct sde_drm_privacy_layer_v1 *privacy_v1);
 
 int dsi_panel_dcs_cmd_tx(struct dsi_panel *panel, enum dsi_cmd_set_type cmd);
+
+int dsi_panel_match_fps_pen_setting(struct dsi_panel *panel,
+		struct dsi_display_mode *mode, int setting);
 
 int dsi_panel_switch_video_mode_out(struct dsi_panel *panel);
 

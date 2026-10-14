@@ -60,6 +60,9 @@ struct dp_debug_private {
 	struct dp_aux_bridge *sim_bridge;
 };
 
+static struct dp_debug_private *debug_priv_ptr;
+static int mode_index;
+
 static int dp_debug_sim_hpd_cb(void *arg, bool hpd, bool hpd_irq)
 {
 	struct dp_debug_private *debug = arg;
@@ -2417,12 +2420,137 @@ static int dp_debug_init_fifo_error(struct dp_debug_private *debug,
 	return rc;
 }
 
+static int prefer_mode_index(int hdisplay, int vdisplay, int refresh_rate)
+{
+	struct drm_display_mode *mode;
+	struct drm_connector *connector;
+	unsigned int index = 1;
+
+	if (!debug_priv_ptr) {
+		DP_ERR("invalid data\n");
+	} else if (!*debug_priv_ptr->connector) {
+		DP_ERR("connector is NULL\n");
+	} else {
+		connector = *debug_priv_ptr->connector;
+		mutex_lock(&connector->dev->mode_config.mutex);
+		list_for_each_entry(mode, &connector->modes, head) {
+			if (mode->hdisplay == hdisplay &&
+			    mode->vdisplay == vdisplay &&
+			    drm_mode_vrefresh(mode) == refresh_rate) {
+				DP_INFO("match index = %d\n", index);
+				mutex_unlock(&connector->dev->mode_config.mutex);
+				return index;
+			}
+			index++;
+		}
+		mutex_unlock(&connector->dev->mode_config.mutex);
+	}
+	DP_INFO("default index = %d\n", index);
+	return 0;
+}
+
+static ssize_t store_prefer_mode(struct device *dev,
+				 struct device_attribute *attr,
+				 const char *buf, size_t count)
+{
+	struct dp_debug_private *debug = debug_priv_ptr;
+	struct dp_panel *panel;
+	int hdisplay = 0, vdisplay = 0, vrefresh = 0, aspect_ratio;
+
+	if (!debug)
+		return -ENODEV;
+	if (sscanf(buf, "%d %d %d %d", &hdisplay, &vdisplay, &vrefresh,
+		   &aspect_ratio) != 4)
+		return count;
+	panel = debug->panel;
+	if (hdisplay && vdisplay && vrefresh) {
+		DP_INFO("hdisplay = %d, vdisplay = %d, vrefresh = %d, aspect_ratio = %d\n",
+			hdisplay, vdisplay, vrefresh, aspect_ratio);
+		panel->hdisplay = hdisplay;
+		panel->vdisplay = vdisplay;
+		panel->vrefresh = vrefresh;
+		panel->aspect_ratio = aspect_ratio;
+		mode_index = prefer_mode_index(hdisplay, vdisplay, vrefresh);
+	} else {
+		DP_DEBUG("clearing debug modes\n");
+		panel->mode_override = false;
+	}
+	return count;
+}
+
+static ssize_t store_hpd_sim(struct device *dev, struct device_attribute *attr,
+			     const char *buf, size_t count)
+{
+	struct dp_debug_private *debug = debug_priv_ptr;
+	int value = 0;
+
+	if (!debug)
+		return -ENODEV;
+	if (kstrtoint(buf, 10, &value))
+		return count;
+	value &= 0x7;
+	debug->hotplug = value & BIT(0);
+	debug->dp_debug.psm_enabled = (value >> 1) & BIT(0);
+	DP_INFO("%s\n", debug->hotplug ? "[CONNECT]" : "[DISCONNECT]");
+	debug->hpd->simulate_connect(debug->hpd, debug->hotplug);
+	return count;
+}
+
+static ssize_t show_lanes_count(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	if (!debug_priv_ptr) {
+		DP_ERR("prefer_edid intface error, debug_priv_ptr is NULL\n");
+		return -ENODEV;
+	}
+	return sprintf(buf, "%d\n",
+		       debug_priv_ptr->link->link_params.lane_count);
+}
+
+static ssize_t show_mode_index(struct device *dev,
+			       struct device_attribute *attr, char *buf)
+{
+	if (!debug_priv_ptr) {
+		DP_ERR("prefer_edid intface error, debug_priv_ptr is NULL\n");
+		return -ENODEV;
+	}
+	return sprintf(buf, "%d\n", mode_index);
+}
+
+static ssize_t store_mode_index(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t count)
+{
+	int value = 0;
+
+	if (!debug_priv_ptr)
+		return -ENODEV;
+	sscanf(buf, "%d", &value);
+	if (value >= 256)
+		value = 0;
+	mode_index = value;
+	DP_INFO("debug mode index = %d\n", mode_index);
+	return count;
+}
+
+static DEVICE_ATTR(prefer_mode, 0200, NULL, store_prefer_mode);
+static DEVICE_ATTR(hpd_sim, 0200, NULL, store_hpd_sim);
+static DEVICE_ATTR(lanes_count, 0400, show_lanes_count, NULL);
+static DEVICE_ATTR(mode_index, 0400, show_mode_index, store_mode_index);
+
 static int dp_debug_init(struct dp_debug *dp_debug)
 {
 	int rc = 0;
 	struct dp_debug_private *debug = container_of(dp_debug,
 		struct dp_debug_private, dp_debug);
 	struct dentry *dir;
+
+	if (debug->dev) {
+		device_create_file(debug->dev, &dev_attr_prefer_mode);
+		device_create_file(debug->dev, &dev_attr_hpd_sim);
+		device_create_file(debug->dev, &dev_attr_lanes_count);
+		device_create_file(debug->dev, &dev_attr_mode_index);
+	}
 
 	if (!IS_ENABLED(CONFIG_DEBUG_FS)) {
 		DP_WARN("Not creating debug root dir.");
@@ -2533,6 +2661,14 @@ static void dp_debug_set_mst_con(struct dp_debug *dp_debug, int con_id)
 	DP_INFO("Selecting mst connector %d\n", con_id);
 }
 
+void dp_debug_reset_override(void)
+{
+	if (debug_priv_ptr) {
+		mode_index = 0;
+		debug_priv_ptr->panel->mode_override = false;
+	}
+}
+
 struct dp_debug *dp_debug_get(struct dp_debug_in *in)
 {
 	int rc = 0;
@@ -2567,6 +2703,7 @@ struct dp_debug *dp_debug_get(struct dp_debug_in *in)
 	dp_debug = &debug->dp_debug;
 
 	mutex_init(&debug->lock);
+	debug_priv_ptr = debug;
 
 	rc = dp_debug_init(dp_debug);
 	if (rc) {

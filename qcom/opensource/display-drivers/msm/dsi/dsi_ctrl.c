@@ -1425,7 +1425,7 @@ static void dsi_configure_command_scheduling(struct dsi_ctrl *dsi_ctrl,
 		sched_line_no = (line_no == 0) ? 1 : line_no;
 
 		if (timing) {
-			if (sched_line_no >= timing->v_front_porch)
+			if (!lcm_2k && sched_line_no >= timing->v_front_porch)
 				sched_line_no = 1;
 			sched_line_no += timing->v_back_porch +
 				timing->v_sync_width + timing->v_active;

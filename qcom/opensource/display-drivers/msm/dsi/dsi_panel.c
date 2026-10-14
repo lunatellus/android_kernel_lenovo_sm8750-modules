@@ -11,11 +11,16 @@
 #include <linux/pinctrl/consumer.h>
 #include <linux/pwm.h>
 #include <video/mipi_display.h>
+#include <linux/string.h>
+#include <linux/mutex.h>
+#include <linux/workqueue.h>
+#include <linux/math64.h>
 
 #include "dsi_panel.h"
 #include "dsi_ctrl_hw.h"
 #include "dsi_parser.h"
 #include "sde_dbg.h"
+#include "sde_trace.h"
 #include "sde_dsc_helper.h"
 #include "sde_vdc_helper.h"
 #include "sde_hw_catalog.h"
@@ -391,6 +396,8 @@ skip_reset_gpio:
 			DSI_WARN("unable to set dir for panel test gpio rc=%d\n",
 					rc);
 	}
+	if (!rc && IS_ENABLED(CONFIG_TOUCHSCREEN_NVT_SPI))
+		nvt_update_firmware_work();
 
 exit:
 	return rc;
@@ -480,6 +487,22 @@ int dsi_panel_power_on(struct dsi_panel *panel, bool is_cont_splash)
 		goto error_disable_vregs;
 	}
 
+	if (!IS_ERR_OR_NULL(panel->pinctrl.pinctrl) &&
+	    !IS_ERR_OR_NULL(panel->pinctrl.iovdd_enable)) {
+		rc = pinctrl_select_state(panel->pinctrl.pinctrl,
+					  panel->pinctrl.iovdd_enable);
+		if (rc)
+			DSI_ERR("[%s] failed to set iovdd_enable pinctrl, rc=%d\n",
+				panel->name, rc);
+	}
+	usleep_range(2000, 2100);
+	rc = bias_enable(1);
+	if (rc)
+		DSI_ERR("[%s] failed to set bias, rc=%d\n",
+			panel->name, rc);
+
+	usleep_range(5000, 5100);
+
 	/* For HFI continuous splash case - avoid panel-reset GPIO */
 	if (is_cont_splash && panel->disp_op == MSM_DISP_OP_HFI) {
 		DSI_DEBUG("[%s] skipping panel reset in hfi path with cont-splash\n", panel->name);
@@ -517,28 +540,35 @@ int dsi_panel_power_off(struct dsi_panel *panel)
 		DSI_DEBUG("skip panel power off\n");
 		return rc;
 	}
+	if (IS_ENABLED(CONFIG_TOUCHSCREEN_NVT_SPI) && nvt_gesture_flag)
+		return rc;
+	usleep_range(10000, 10100);
 
 	if (gpio_is_valid(panel->reset_config.disp_en_gpio))
 		gpio_set_value(panel->reset_config.disp_en_gpio, 0);
-
+	usleep_range(15000, 15100);
 	if (gpio_is_valid(panel->reset_config.reset_gpio) &&
-					!panel->reset_gpio_always_on)
+	    !panel->reset_gpio_always_on)
 		gpio_set_value(panel->reset_config.reset_gpio, 0);
-
+	usleep_range(5000, 5100);
 	if (gpio_is_valid(panel->reset_config.lcd_mode_sel_gpio))
 		gpio_set_value(panel->reset_config.lcd_mode_sel_gpio, 0);
-
 	if (gpio_is_valid(panel->panel_test_gpio)) {
 		rc = gpio_direction_input(panel->panel_test_gpio);
 		if (rc)
 			DSI_WARN("set dir for panel test gpio failed rc=%d\n",
 				 rc);
 	}
+	rc = bias_enable(0);
+	if (rc)
+		DSI_ERR("[%s] failed to set bias, rc=%d\n",
+			panel->name, rc);
 
-	rc = dsi_panel_set_pinctrl_state(panel, false, false);
-	if (rc) {
-		DSI_ERR("[%s] failed set pinctrl state, rc=%d\n", panel->name,
-		       rc);
+	if (!panel->host_config.ext_bridge_mode) {
+		rc = dsi_panel_set_pinctrl_state(panel, false, false);
+		if (rc)
+			DSI_ERR("[%s] failed set pinctrl state, rc=%d\n",
+				panel->name, rc);
 	}
 
 	rc = dsi_pwr_enable_regulator(&panel->power_info, false);
@@ -546,6 +576,16 @@ int dsi_panel_power_off(struct dsi_panel *panel)
 		DSI_ERR("[%s] failed to enable vregs, rc=%d\n",
 				panel->name, rc);
 
+	usleep_range(5000, 5100);
+
+	if (!IS_ERR_OR_NULL(panel->pinctrl.pinctrl) &&
+	    !IS_ERR_OR_NULL(panel->pinctrl.iovdd_disable)) {
+		rc = pinctrl_select_state(panel->pinctrl.pinctrl,
+					  panel->pinctrl.iovdd_disable);
+		if (rc)
+			DSI_ERR("[%s] failed to set iovdd_disable pinctrl, rc=%d\n",
+				panel->name, rc);
+	}
 	return rc;
 }
 static int dsi_panel_tx_cmd_set(struct dsi_panel *panel,
@@ -665,6 +705,18 @@ static int dsi_panel_pinctrl_init(struct dsi_panel *panel)
 	if (IS_ERR_OR_NULL(panel->pinctrl.pwm_pin)) {
 		panel->pinctrl.pwm_pin = NULL;
 		DSI_DEBUG("failed to get pinctrl pwm_pin");
+	}
+	panel->pinctrl.iovdd_enable =
+		pinctrl_lookup_state(panel->pinctrl.pinctrl, "iovdd_enable");
+	if (IS_ERR_OR_NULL(panel->pinctrl.iovdd_enable)) {
+		panel->pinctrl.iovdd_enable = NULL;
+		DSI_ERR("failed to get pinctrl iovdd_enable");
+	}
+	panel->pinctrl.iovdd_disable =
+		pinctrl_lookup_state(panel->pinctrl.pinctrl, "iovdd_disable");
+	if (IS_ERR_OR_NULL(panel->pinctrl.iovdd_disable)) {
+		panel->pinctrl.iovdd_disable = NULL;
+		DSI_ERR("failed to get pinctrl iovdd_disable");
 	}
 
 	panel->pinctrl.cur_state = NULL;
@@ -807,6 +859,8 @@ int dsi_panel_set_backlight(struct dsi_panel *panel, u32 bl_lvl)
 		rc = dsi_panel_update_backlight(panel, bl_lvl);
 		break;
 	case DSI_BACKLIGHT_EXTERNAL:
+		if (bl_lvl)
+			bl_set_level(bl_lvl);
 		break;
 	case DSI_BACKLIGHT_PWM:
 		rc = dsi_panel_update_pwm_backlight(panel, bl_lvl);
@@ -2136,6 +2190,8 @@ static int dsi_panel_parse_dfps_caps(struct dsi_panel *panel)
 		dfps_caps->type = DSI_DFPS_IMMEDIATE_HFP;
 	} else if (!strcmp(type, "dfps_immediate_porch_mode_vfp")) {
 		dfps_caps->type = DSI_DFPS_IMMEDIATE_VFP;
+	} else if (!strcmp(type, "dfps_custom")) {
+		dfps_caps->type = DSI_DFPS_CUSTOM;
 	} else {
 		DSI_ERR("[%s] dfps type is not recognized\n", name);
 		rc = -EINVAL;
@@ -2165,6 +2221,52 @@ static int dsi_panel_parse_dfps_caps(struct dsi_panel *panel)
 		DSI_ERR("[%s] dfps refresh rate list parse failed\n", name);
 		rc = -EINVAL;
 		goto error;
+	}
+	if (dfps_caps->type == DSI_DFPS_CUSTOM) {
+		struct device_node *timings_np, *child_np;
+		u32 count, index = 0;
+
+		timings_np = utils->get_child_by_name(utils->data, "qcom,dfps-timings");
+		if (!timings_np && !panel->host_config.ext_bridge_mode) {
+			DSI_ERR("no dfps timing nodes defined\n");
+			rc = -EINVAL;
+			goto error;
+		}
+		count = utils->get_child_count(timings_np);
+		if (!count || count != dfps_caps->dfps_list_len) {
+			DSI_ERR("invalid count of dtiming node\n");
+			rc = -EINVAL;
+			goto error;
+		}
+		dfps_caps->timings = devm_kcalloc(panel->parent, count,
+				sizeof(struct dsi_dfps_timing), GFP_KERNEL);
+		if (!dfps_caps->timings) {
+			rc = -ENOMEM;
+			goto error;
+		}
+		rc = -EINVAL;
+		dsi_for_each_child_node(timings_np, child_np) {
+			rc *= utils->read_u32(child_np, "hfp",
+					&dfps_caps->timings[index].hfp);
+			rc *= utils->read_u32(child_np, "hbp",
+					&dfps_caps->timings[index].hbp);
+			rc *= utils->read_u32(child_np, "hsa",
+					&dfps_caps->timings[index].hsync);
+			rc *= utils->read_u32(child_np, "vfp",
+					&dfps_caps->timings[index].vfp);
+			rc *= utils->read_u32(child_np, "vbp",
+					&dfps_caps->timings[index].vbp);
+			rc *= utils->read_u32(child_np, "vsa",
+					&dfps_caps->timings[index].vsync);
+			rc *= utils->read_u32(child_np, "fps",
+					&dfps_caps->timings[index].fps);
+			if (rc) {
+				DSI_ERR("invalid dtiming nodes\n");
+				rc = -EINVAL;
+				goto error;
+			}
+			index++;
+		}
 	}
 	dfps_caps->dfps_support = true;
 
@@ -2472,6 +2574,16 @@ const char *cmd_set_prop_map[DSI_CMD_SET_MAX] = {
 	"qcom,mdss-dsi-sticky_still_disable-command",
 	"qcom,mdss-dsi-sticky_on_fly-command",
 	"qcom,mdss-dsi-trigger_self_refresh-command",
+	"qcom,mdss-dsi-dispparam-pen-disable-control-command",
+	"qcom,mdss-dsi-dispparam-pen-144hz-switch-command",
+	"qcom,mdss-dsi-dispparam-pen-165hz-switch-command",
+	"qcom,mdss-dsi-dispparam-pen-90hz-switch-command",
+	"qcom,mdss-dsi-dispparam-pen-enable-touch-command",
+	"qcom,mdss-dsi-dispparam-pen-others-enable-control-command",
+	"qcom,mdss-dsi-dispparam-pen-others-switch-command",
+	"qcom,mdss-dsi-dispparam-pen-144hz-power-on-command",
+	"qcom,mdss-dsi-dispparam-pen-165hz-power-on-command",
+	"qcom,mdss-dsi-dispparam-pen-90hz-power-on-command",
 	"qcom,mdss-dsi-fps-switch-command",
 	"qcom,mdss-dsi-em-pulse-switch-command",
 	"Privacy layer not parsed from DTSI, generated dynamically",
@@ -2519,6 +2631,16 @@ const char *cmd_set_state_map[DSI_CMD_SET_MAX] = {
 	"qcom,mdss-dsi-sticky_still_disable-command-state",
 	"qcom,mdss-dsi-sticky_on_fly-command-state",
 	"qcom,mdss-dsi-trigger_self_refresh-command-state",
+	"qcom,mdss-dsi-dispparam-pen-disable-control-command-state",
+	"qcom,mdss-dsi-dispparam-pen-144hz-switch-command-state",
+	"qcom,mdss-dsi-dispparam-pen-165hz-switch-command-state",
+	"qcom,mdss-dsi-dispparam-pen-90hz-switch-command-state",
+	"qcom,mdss-dsi-dispparam-pen-enable-touch-command-state",
+	"qcom,mdss-dsi-dispparam-pen-others-enable-control-command-state",
+	"qcom,mdss-dsi-dispparam-pen-others-switch-command-state",
+	"qcom,mdss-dsi-dispparam-pen-144hz-power-on-command-state",
+	"qcom,mdss-dsi-dispparam-pen-165hz-power-on-command-state",
+	"qcom,mdss-dsi-dispparam-pen-90hz-power-on-command-state",
 	"qcom,mdss-dsi-fps-switch-command-state",
 	"qcom,mdss-dsi-em-pulse-switch-command-state",
 	"Privacy layer not parsed from DTSI, generated dynamically",
@@ -4318,13 +4440,7 @@ static int dsi_panel_parse_esd_config(struct dsi_panel *panel)
 		} else if (!strcmp(string, "reg_read")) {
 			esd_config->status_mode = ESD_MODE_REG_READ;
 		} else if (!strcmp(string, "te_signal_check")) {
-			if (panel->panel_mode == DSI_OP_CMD_MODE) {
-				esd_config->status_mode = ESD_MODE_PANEL_TE;
-			} else {
-				DSI_ERR("TE-ESD not valid for video mode\n");
-				rc = -EINVAL;
-				goto error;
-			}
+			esd_config->status_mode = ESD_MODE_PANEL_TE;
 		} else if (!strcmp(string, "rw_low_detection")) {
 			esd_config->status_mode = ESD_MODE_PANEL_RW;
 		} else if (!strcmp(string, "esd_sw_sim_success")) {
@@ -6163,12 +6279,15 @@ int dsi_panel_enable(struct dsi_panel *panel)
 
 	mutex_lock(&panel->panel_lock);
 
+	SDE_ATRACE_BEGIN("DSI_CMD_SET_ON");
 	rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_ON, false);
 	if (rc) {
 		DSI_ERR("[%s] failed to send DSI_CMD_SET_ON cmds, rc=%d\n",
 		       panel->name, rc);
 		goto error;
 	}
+	SDE_ATRACE_END("DSI_CMD_SET_ON");
+	SDE_ATRACE_BEGIN("DSI_CMD_SET_VID_ON");
 
 	if (panel->panel_mode == DSI_OP_CMD_MODE) {
 		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_CMD_ON, false);
@@ -6185,6 +6304,7 @@ int dsi_panel_enable(struct dsi_panel *panel)
 			goto error;
 		}
 	}
+	SDE_ATRACE_END("DSI_CMD_SET_VID_ON");
 	panel->panel_initialized = true;
 
 error:
@@ -6195,6 +6315,8 @@ error:
 int dsi_panel_post_enable(struct dsi_panel *panel)
 {
 	int rc = 0;
+	u32 refresh_rate;
+	u32 cmd_set;
 
 	if (!panel) {
 		DSI_ERR("invalid params\n");
@@ -6213,10 +6335,30 @@ int dsi_panel_post_enable(struct dsi_panel *panel)
 	}
 
 	rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_POST_ON, false);
-	if (rc) {
+	if (rc)
 		DSI_ERR("[%s] failed to send DSI_CMD_SET_POST_ON cmds, rc=%d\n",
 		       panel->name, rc);
-		goto error;
+
+	if (lcm_2k) {
+		refresh_rate = panel->cur_mode->timing.refresh_rate;
+		switch (refresh_rate) {
+		case 90:
+			cmd_set = DSI_CMD_SET_PEN_90HZ_POWER_ON;
+			break;
+		case 144:
+			cmd_set = DSI_CMD_SET_PEN_144HZ_POWER_ON;
+			break;
+		case 165:
+			cmd_set = DSI_CMD_SET_PEN_165HZ_POWER_ON;
+			break;
+		default:
+			goto error;
+		}
+
+		rc = dsi_panel_tx_cmd_set(panel, cmd_set, false);
+		if (rc)
+			DSI_ERR("[%s] failed to update TP fps code setting, rc=%d\n",
+			       panel->name, rc);
 	}
 error:
 	mutex_unlock(&panel->panel_lock);
@@ -6283,6 +6425,9 @@ int dsi_panel_disable(struct dsi_panel *panel)
 					panel->name, rc);
 			rc = 0;
 		}
+		msleep(15);
+		bl_set_level(0);
+		msleep(0x55);
 	}
 	panel->panel_initialized = false;
 	panel->power_mode = SDE_MODE_DPMS_OFF;
@@ -6342,4 +6487,62 @@ int dsi_panel_post_unprepare(struct dsi_panel *panel)
 error:
 	mutex_unlock(&panel->panel_lock);
 	return rc;
+}
+
+int dsi_panel_match_fps_pen_setting(struct dsi_panel *panel,
+		struct dsi_display_mode *mode, int setting)
+{
+	static bool tp_timing_disable;
+	int rc = 0;
+
+	if (!lcm_2k)
+		return 0;
+
+	if (!panel || !mode || !panel->cur_mode) {
+		DSI_ERR("invalid params\n");
+		return -EAGAIN;
+	}
+
+	if (setting == 1) {
+		switch (mode->timing.refresh_rate) {
+		case 30:
+		case 60:
+		case 120:
+			rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_PEN_OTHERS_SWITCH,
+					false);
+			break;
+		case 165:
+			rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_PEN_165HZ_SWITCH,
+					false);
+			tp_timing_disable = true;
+			break;
+		case 144:
+			rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_PEN_144HZ_SWITCH,
+					false);
+			tp_timing_disable = true;
+			break;
+		case 90:
+			rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_PEN_90HZ_SWITCH,
+					false);
+			tp_timing_disable = true;
+			break;
+		default:
+			break;
+		}
+	} else if (setting == 2) {
+		if (tp_timing_disable) {
+			rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_PEN_ENABLE_TOUCH,
+					false);
+			tp_timing_disable = false;
+		}
+	} else {
+		pr_info("dsi: wrong stages = %d\n", setting);
+	}
+
+	if (rc) {
+		DSI_ERR("Failed to send DSI_CMD_SET_DISP_PEN_120HZ command\n");
+		return -EAGAIN;
+	}
+
+	return 0;
 }

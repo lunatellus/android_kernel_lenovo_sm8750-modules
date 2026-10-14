@@ -473,6 +473,37 @@ static int sde_backlight_cooling_cb(struct notifier_block *nb,
 	return 0;
 }
 
+extern int bl_get_hbm(void);
+extern int bl_set_hbm(u32);
+
+static ssize_t hbm_show(struct device *dev, struct device_attribute *attr,
+			char *buf)
+{
+	int level = bl_get_hbm();
+
+	if (level < 0)
+		return -EINVAL;
+	return scnprintf(buf, PAGE_SIZE, "%d\n", level);
+}
+
+static ssize_t hbm_store(struct device *dev, struct device_attribute *attr,
+			 const char *buf, size_t count)
+{
+	unsigned long long level;
+	int ret;
+
+	ret = kstrtoull(buf, 0, &level);
+	if (ret) {
+		SDE_ERROR("mode transfer error\n");
+		return -EINVAL;
+	}
+	drm_dev_dbg(dev, DRM_UT_KMS, "hbm_mode: %llu, count: %zu\n",
+		level, count);
+	ret = bl_set_hbm(level);
+	return ret < 0 ? -EIO : count;
+}
+
+static DEVICE_ATTR_RW(hbm);
 static int sde_backlight_setup(struct sde_connector *c_conn,
 					struct drm_device *dev)
 {
@@ -480,6 +511,7 @@ static int sde_backlight_setup(struct sde_connector *c_conn,
 	struct dsi_display *display;
 	struct dsi_backlight_config *bl_config;
 	struct sde_kms *sde_kms;
+	int rc;
 	static int display_count;
 
 	char bl_node_name[BL_NODE_NAME_SIZE];
@@ -517,7 +549,13 @@ static int sde_backlight_setup(struct sde_connector *c_conn,
 		c_conn->bl_device = NULL;
 		return -ENODEV;
 	}
+
 	c_conn->thermal_max_brightness = bl_config->brightness_max_level;
+	rc = sysfs_create_file(&c_conn->bl_device->dev.kobj, &dev_attr_hbm.attr);
+	if (rc) {
+		SDE_ERROR("Failed to create hbm_mode node");
+		return -ENODEV;
+	}
 
 	/**
 	 * In TVM, thermal cooling device is not enabled. Registering with dummy

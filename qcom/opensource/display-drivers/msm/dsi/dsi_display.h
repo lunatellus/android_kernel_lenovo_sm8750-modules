@@ -960,6 +960,8 @@ int dsi_display_avoid_cmd_transfer(void *display, bool avoid_transfer);
  */
 int dsi_display_get_panel_scan_line(void *display, u16 *scan_line, ktime_t *scan_line_ts);
 
+void dsi_display_update_dma_sched_line(struct dsi_display *display, u32 line);
+
 /**
  * dsi_display_phy_enable() - enables the phy for the display
  * @display: Handle to display

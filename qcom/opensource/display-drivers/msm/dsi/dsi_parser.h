@@ -10,6 +10,8 @@
 #include <linux/of.h>
 #include <linux/of_gpio.h>
 #include <linux/version.h>
+extern bool nvt_gesture_flag;
+extern void nvt_update_firmware_work(void);
 
 #if IS_ENABLED(CONFIG_DSI_PARSER)
 void *dsi_parser_get(struct device *dev);

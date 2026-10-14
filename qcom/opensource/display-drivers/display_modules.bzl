@@ -1,4 +1,4 @@
-load(":repo_paths.bzl", "modules_label")
+load(":repo_paths.bzl", "modules_label", "soc_label")
 load(":display_driver_build.bzl", "display_module_entry")
 
 display_driver_modules = display_module_entry([":display_drivers_headers"])
@@ -195,6 +195,8 @@ module_entry(
             "msm/dsi/dsi_panel.c",
             "msm/dsi/dsi_clk_manager.c",
             "msm/dsi/dsi_display_test.c",
+            "msm/dsi/dsi_bias.c",
+            "msm/dsi/dsi_bl.c",
         ],
         "CONFIG_DSI_PARSER": [
             "msm/dsi/dsi_parser.c",
@@ -234,6 +236,12 @@ module_entry(
 
     # Configs are handled by config_options = []
     config_deps = {
+        "CONFIG_HQ_SYSFS": [
+            soc_label("%b/drivers/misc/hq/hqsysfs/hqsysfs"),
+        ],
+        "CONFIG_TOUCHSCREEN_NVT_SPI": [
+            soc_label("%b/drivers/input/touchscreen/nvt_touch_spi/nvt_36xxx"),
+        ],
         "CONFIG_QTI_HW_FENCE": [
             modules_label("qcom/opensource/mm-drivers/hw_fence:%b_msm_hw_fence"),
             modules_label("qcom/opensource/synx-kernel:%b_modules"),
