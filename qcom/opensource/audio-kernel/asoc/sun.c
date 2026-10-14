@@ -123,7 +123,8 @@ static struct wcd_mbhc_config wcd_mbhc_cfg = {
 	.key_code[5] = 0,
 	.key_code[6] = 0,
 	.key_code[7] = 0,
-	.linein_th = 5000,
+	/* Lenovo disables line-out reclassification for the headset jack. */
+	.linein_th = 0x0ffffffe,
 	.moisture_en = false,
 	.mbhc_micbias = MIC_BIAS_2,
 	.anc_micbias = MIC_BIAS_2,
@@ -459,7 +460,7 @@ static void *def_wcd_mbhc_cal(void)
 		(sizeof(btn_cfg->_v_btn_low[0]) * btn_cfg->num_btn);
 
 	btn_high[0] = 75;
-	btn_high[1] = 150;
+	btn_high[1] = 145;
 	btn_high[2] = 237;
 	btn_high[3] = 500;
 	btn_high[4] = 500;
@@ -1025,6 +1026,20 @@ static struct snd_soc_dai_link msm_va_cdc_dma_be_dai_links[] = {
  * Senary	- lpi_i2s2
  * ------------------------------------
  */
+SND_SOC_DAILINK_DEFS(sec_mi2s_rx_smartpa,
+	DAILINK_COMP_ARRAY(COMP_CPU("snd-soc-dummy-dai")),
+	DAILINK_COMP_ARRAY(
+		COMP_CODEC("aw882xx_smartpa_0", "aw882xx-aif-0"),
+		COMP_CODEC("aw882xx_smartpa_1", "aw882xx-aif-1")),
+	DAILINK_COMP_ARRAY(COMP_PLATFORM("snd-soc-dummy")));
+
+SND_SOC_DAILINK_DEFS(sec_mi2s_tx_smartpa,
+	DAILINK_COMP_ARRAY(COMP_CPU("snd-soc-dummy-dai")),
+	DAILINK_COMP_ARRAY(
+		COMP_CODEC("aw882xx_smartpa_0", "aw882xx-aif-0"),
+		COMP_CODEC("aw882xx_smartpa_1", "aw882xx-aif-1")),
+	DAILINK_COMP_ARRAY(COMP_PLATFORM("snd-soc-dummy")));
+
 static struct snd_soc_dai_link msm_mi2s_dai_links[] = {
 	{
 		.name = LPASS_BE_PRI_MI2S_RX,
@@ -1056,7 +1071,7 @@ static struct snd_soc_dai_link msm_mi2s_dai_links[] = {
 		.ops = &msm_common_be_ops,
 		.ignore_suspend = 1,
 		.ignore_pmdown_time = 1,
-		SND_SOC_DAILINK_REG(sec_mi2s_rx),
+		SND_SOC_DAILINK_REG(sec_mi2s_rx_smartpa),
 	},
 	{
 		.name = LPASS_BE_SEC_MI2S_TX,
@@ -1066,7 +1081,7 @@ static struct snd_soc_dai_link msm_mi2s_dai_links[] = {
 			SND_SOC_DPCM_TRIGGER_POST},
 		.ops = &msm_common_be_ops,
 		.ignore_suspend = 1,
-		SND_SOC_DAILINK_REG(sec_mi2s_tx),
+		SND_SOC_DAILINK_REG(sec_mi2s_tx_smartpa),
 	},
 	{
 		.name = LPASS_BE_TERT_MI2S_RX,

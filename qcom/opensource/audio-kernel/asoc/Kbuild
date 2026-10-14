@@ -197,6 +197,16 @@ ifdef CONFIG_SND_SOC_PINEAPPLE
 	MACHINE_OBJS += pineapple.o
 endif
 
+# for SUN sound card driver
+ifdef CONFIG_SND_SOC_SUN
+	MACHINE_OBJS += sun.o
+endif
+
+# for TUNA sound card driver
+ifdef CONFIG_SND_SOC_TUNA
+	MACHINE_OBJS += sun.o
+endif
+
 # for HOLI sound card driver
 ifdef CONFIG_SND_SOC_HOLI
 	MACHINE_OBJS += holi.o
@@ -292,6 +302,12 @@ obj-$(CONFIG_SND_SOC_KALAMA) += machine_dlkm.o
 machine_dlkm-y := $(MACHINE_OBJS)
 
 obj-$(CONFIG_SND_SOC_PINEAPPLE) += machine_dlkm.o
+machine_dlkm-y := $(MACHINE_OBJS)
+
+obj-$(CONFIG_SND_SOC_SUN) += machine_dlkm.o
+machine_dlkm-y := $(MACHINE_OBJS)
+
+obj-$(CONFIG_SND_SOC_TUNA) += machine_dlkm.o
 machine_dlkm-y := $(MACHINE_OBJS)
 
 obj-$(CONFIG_SND_SOC_HOLI) += machine_dlkm.o

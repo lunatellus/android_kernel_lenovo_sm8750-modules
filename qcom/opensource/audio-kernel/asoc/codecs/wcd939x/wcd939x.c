@@ -34,6 +34,7 @@
 #include <linux/proc_fs.h>
 #include <linux/version.h>
 #include <linux/vmalloc.h>
+#include <linux/hq_hw_info.h>
 
 #if IS_ENABLED(CONFIG_QCOM_WCD_USBSS_I2C)
 #include <linux/soc/qcom/wcd939x-i2c.h>
@@ -5602,6 +5603,7 @@ static int wcd939x_bind(struct device *dev)
 		goto err_irq;
 	}
 	wcd939x->dev_up = true;
+	hq_regiser_hw_info(HWID_AUDIO_CODEC, "WCD939X");
 
 	/* Register notifier with wcd939x slave. */
 	if (wcd939x_slave_register_notify(wcd939x->tx_swr_dev,
