@@ -7,6 +7,8 @@ def define_modules(target, variant):
     tv = "{}_{}".format(target, variant)
     copts = []
     deps = [soc_label("all_headers")]
+    # st21nfc calls msm_gpio_mpm_wake_set() from the soc pinctrl-msm module.
+    deps += [soc_label("{}/drivers/pinctrl/qcom/pinctrl-msm".format(tv))]
 
     if target == "sun":
         copts.append("-DNFC_SECURE_PERIPHERAL_ENABLED")
