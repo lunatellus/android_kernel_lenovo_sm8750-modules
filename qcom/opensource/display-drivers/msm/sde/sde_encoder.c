@@ -7487,7 +7487,7 @@ void sde_encoder_kickoff(struct drm_encoder *drm_enc, bool config_changed)
 	struct drm_bridge *bridge;
 	struct dsi_bridge *c_bridge;
 	struct dsi_display *display = NULL;
-	struct dsi_display_mode *mode;
+	struct dsi_display_mode mode;
 	u32 new_fps = 0;
 	static u32 old_fps;
 
@@ -7546,11 +7546,16 @@ void sde_encoder_kickoff(struct drm_encoder *drm_enc, bool config_changed)
 			return;
 		}
 		c_bridge = container_of(bridge, struct dsi_bridge, base);
-		mode = &c_bridge->dsi_mode;
+		/*
+		 * Snapshot the mode as stock does: the commit clears
+		 * DSI_MODE_FLAG_VRR in c_bridge->dsi_mode before the post-kickoff
+		 * check below, which must see the same flags as the lock.
+		 */
+		mode = c_bridge->dsi_mode;
 		display = c_bridge->display;
 		if (display && display->panel &&
-		    (mode->dsi_mode_flags & DSI_MODE_FLAG_VRR)) {
-			new_fps = mode->timing.refresh_rate;
+		    (mode.dsi_mode_flags & DSI_MODE_FLAG_VRR)) {
+			new_fps = mode.timing.refresh_rate;
 			mutex_lock(&display->panel->panel_lock);
 			if (!is_skip_stage_fps_cmd_send(old_fps, new_fps, 1)) {
 				SDE_ATRACE_BEGIN("sde_encoder_vid_wait_for_active1");
@@ -7571,18 +7576,18 @@ void sde_encoder_kickoff(struct drm_encoder *drm_enc, bool config_changed)
 	}
 
 	if (display && display->panel &&
-	    (mode->dsi_mode_flags & DSI_MODE_FLAG_VRR)) {
+	    (mode.dsi_mode_flags & DSI_MODE_FLAG_VRR)) {
 		if (!is_skip_stage_fps_cmd_send(old_fps, new_fps, 1)) {
 			if (old_fps == 30)
 				dsi_display_update_dma_sched_line(display, 6000);
 			else if (old_fps == 60)
 				dsi_display_update_dma_sched_line(display, 1800);
 			SDE_ATRACE_BEGIN("kirby set1");
-			dsi_panel_match_fps_pen_setting(display->panel, mode, 1);
+			dsi_panel_match_fps_pen_setting(display->panel, &mode, 1);
 			SDE_ATRACE_END("kirby set1");
 			dsi_display_update_dma_sched_line(display, 1);
 		}
-		old_fps = mode->timing.refresh_rate;
+		old_fps = mode.timing.refresh_rate;
 		mutex_unlock(&display->panel->panel_lock);
 	}
 
