@@ -24,5 +24,6 @@ def define_sun():
              "CONFIG_QCOM_SMCINVOKE",
              "CONFIG_QSEECOM_COMPAT",
              "CONFIG_QCOM_SI_CORE",
+             "CONFIG_MSM_TMECOM_QMP",
          ],
      )
