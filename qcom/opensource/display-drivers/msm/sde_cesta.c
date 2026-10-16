@@ -1211,6 +1211,9 @@ static void sde_cesta_deinit(struct platform_device *pdev, struct sde_cesta *ces
 	if (cesta->wrapper_io.base)
 		msm_dss_iounmap(&cesta->wrapper_io);
 
+	if (cesta->disp_cc_io.base)
+		msm_dss_iounmap(&cesta->disp_cc_io);
+
 	for (i = 0; i < cesta->scc_count; i++) {
 		if (cesta->scc_io[i].base)
 			msm_dss_iounmap(&cesta->scc_io[i]);
