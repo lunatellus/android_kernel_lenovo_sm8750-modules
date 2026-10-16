@@ -1,0 +1,64 @@
+load(":define_modules.bzl", "define_rmnet_ctl_module", "define_rmnet_core_module")
+load("//build/kernel/kleaf:kernel.bzl", "ddk_headers")
+
+define_rmnet_ctl_module("sun", "consolidate")
+define_rmnet_core_module("sun", "consolidate")
+define_rmnet_ctl_module("sun", "perf")
+define_rmnet_core_module("sun", "perf")
+
+define_rmnet_ctl_module("canoe", "consolidate")
+define_rmnet_core_module("canoe", "consolidate")
+define_rmnet_ctl_module("canoe", "perf")
+define_rmnet_core_module("canoe", "perf")
+
+define_rmnet_ctl_module("vienna", "consolidate")
+define_rmnet_core_module("vienna", "consolidate")
+define_rmnet_ctl_module("vienna", "perf")
+define_rmnet_core_module("vienna", "perf")
+
+define_rmnet_ctl_module("monaco", "consolidate")
+define_rmnet_core_module("monaco", "consolidate")
+define_rmnet_ctl_module("monaco", "perf")
+define_rmnet_core_module("monaco", "perf")
+
+define_rmnet_ctl_module("lahaina", "consolidate")
+define_rmnet_core_module("lahaina", "consolidate")
+define_rmnet_ctl_module("lahaina", "perf")
+define_rmnet_core_module("lahaina", "perf")
+
+define_rmnet_ctl_module("bengal", "consolidate")
+define_rmnet_core_module("bengal", "consolidate")
+define_rmnet_ctl_module("bengal", "perf")
+define_rmnet_core_module("bengal", "perf")
+
+define_rmnet_ctl_module("chora", "consolidate")
+define_rmnet_core_module("chora", "consolidate")
+define_rmnet_ctl_module("chora", "perf")
+define_rmnet_core_module("chora", "perf")
+
+define_rmnet_ctl_module("malabar", "consolidate")
+define_rmnet_core_module("malabar", "consolidate")
+define_rmnet_ctl_module("malabar", "perf")
+define_rmnet_core_module("malabar", "perf")
+
+define_rmnet_core_module("shikra", "consolidate")
+define_rmnet_core_module("shikra", "perf")
+
+define_rmnet_ctl_module("waipio", "consolidate")
+define_rmnet_core_module("waipio", "consolidate")
+define_rmnet_ctl_module("waipio", "perf")
+define_rmnet_core_module("waipio", "perf")
+
+package(
+    default_visibility = [
+        "//visibility:public",
+    ],
+)
+
+ddk_headers(
+    name = "rmnet_core_headers",
+    hdrs = glob([
+        "core/*.h",
+    ]),
+    includes = ["core"],
+)

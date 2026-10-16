@@ -1,0 +1,51 @@
+load("//build/kernel/kleaf:kernel.bzl", "ddk_headers")
+
+ddk_headers(
+    name = "btfmcodec_headers",
+    hdrs = glob([
+        "btfmcodec/include/*.h"
+    ]),
+    includes = ["btfmcodec/include"]
+)
+
+ddk_headers(
+    name = "spi_cnss_headers",
+    hdrs = glob([
+        "spi/include/*.h"
+    ]),
+    includes = ["spi/include"]
+)
+
+ddk_headers(
+    name = "thqspi_headers",
+    hdrs = glob([
+        "thq-spi/include/*.h"
+    ]),
+    includes = ["thq-spi/include"]
+)
+
+load(":target.bzl", "define_pineapple")
+load(":target.bzl", "define_sun")
+load(":target.bzl", "define_parrot")
+load(":target.bzl", "define_canoe")
+load(":target.bzl", "define_parrot66")
+load(":target.bzl", "define_chora")
+load(":target.bzl", "define_malabar")
+load(":target.bzl", "define_seraph")
+load(":target.bzl", "define_bengal")
+load(":target.bzl", "define_hamoa")
+load(":target.bzl", "define_lahaina")
+load(":target.bzl", "define_hamoa_la")
+
+define_pineapple()
+define_sun()
+define_parrot()
+define_canoe()
+define_parrot66()
+define_chora()
+define_malabar()
+define_seraph()
+define_bengal()
+define_hamoa()
+define_lahaina()
+define_hamoa_la()

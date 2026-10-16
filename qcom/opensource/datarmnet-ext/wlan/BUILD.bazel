@@ -1,0 +1,58 @@
+load(":define_wlan.bzl", "define_wlan")
+load("//build/kernel/kleaf:kernel.bzl", "ddk_headers", "ddk_module")
+
+define_wlan("sun", "consolidate")
+define_wlan("sun", "perf")
+
+define_wlan("canoe", "consolidate")
+define_wlan("canoe", "perf")
+
+define_wlan("vienna", "consolidate")
+define_wlan("vienna", "perf")
+
+define_wlan("monaco", "consolidate")
+define_wlan("monaco", "perf")
+
+define_wlan("lahaina", "consolidate")
+define_wlan("lahaina", "perf")
+
+define_wlan("bengal", "consolidate")
+define_wlan("bengal", "perf")
+
+define_wlan("chora", "consolidate")
+define_wlan("chora", "perf")
+
+define_wlan("malabar", "consolidate")
+define_wlan("malabar", "perf")
+
+define_wlan("waipio", "consolidate")
+define_wlan("waipio", "perf")
+
+ddk_headers(
+    name = "rmnet_wlan_include_headers",
+    hdrs = glob([
+        "include/linux/*.h",
+    ]),
+    includes = [
+        "include",
+        "include/linux",
+    ],
+)
+
+ddk_headers(
+    name = "rmnet_wlan_uapi_include_headers",
+    hdrs = glob([
+        "include/uapi/linux/*.h",
+    ]),
+    includes = [
+        "include/uapi",
+    ],
+)
+
+ddk_headers(
+    name = "include_headers",
+    hdrs = [
+        ":rmnet_wlan_include_headers",
+        ":rmnet_wlan_uapi_include_headers",
+    ],
+)

@@ -1,0 +1,52 @@
+load(":define_perf.bzl", "define_perf")
+load("//build/kernel/kleaf:kernel.bzl",  "ddk_headers", "ddk_module")
+
+define_perf("sun", "consolidate")
+define_perf("sun", "perf")
+
+define_perf("canoe", "consolidate")
+define_perf("canoe", "perf")
+
+define_perf("vienna", "consolidate")
+define_perf("vienna", "perf")
+
+define_perf("lahaina", "consolidate")
+define_perf("lahaina", "perf")
+
+define_perf("chora", "consolidate")
+define_perf("chora", "perf")
+
+define_perf("malabar", "consolidate")
+define_perf("malabar", "perf")
+
+define_perf("waipio", "consolidate")
+define_perf("waipio", "perf")
+
+ddk_headers(
+    name = "rmnet_perf_include_headers",
+    hdrs = glob([
+        "include/linux/*.h",
+    ]),
+    includes = [
+        "include",
+        "include/linux",
+    ],
+)
+
+ddk_headers(
+    name = "rmnet_perf_uapi_include_headers",
+    hdrs = glob([
+        "include/uapi/linux/*.h",
+    ]),
+    includes = [
+        "include/uapi",
+    ],
+)
+
+ddk_headers(
+    name = "include_headers",
+    hdrs = [
+        ":rmnet_perf_include_headers",
+        ":rmnet_perf_uapi_include_headers",
+    ],
+)

@@ -1,0 +1,50 @@
+load(":define_mem.bzl", "define_mem")
+load("//build/kernel/kleaf:kernel.bzl", "ddk_headers")
+
+define_mem("pineapple", "consolidate")
+define_mem("pineapple", "perf")
+
+define_mem("sun", "consolidate")
+define_mem("sun", "perf")
+
+define_mem("parrot", "consolidate")
+define_mem("parrot", "perf")
+
+define_mem("monaco", "consolidate")
+define_mem("monaco", "perf")
+
+define_mem("canoe", "consolidate")
+define_mem("canoe", "perf")
+
+define_mem("vienna", "consolidate")
+define_mem("vienna", "perf")
+
+define_mem("lahaina", "consolidate")
+define_mem("lahaina", "perf")
+
+define_mem("bengal", "consolidate")
+define_mem("bengal", "perf")
+
+define_mem("chora", "consolidate")
+define_mem("chora", "perf")
+
+define_mem("malabar", "consolidate")
+define_mem("malabar", "perf")
+
+define_mem("shikra", "consolidate")
+define_mem("shikra", "perf")
+
+define_mem("waipio", "consolidate")
+define_mem("waipio", "perf")
+
+package(
+	default_visibility = [
+	"//visibility:public", ],
+)
+ddk_headers(
+    name = "rmnet_mem_uapi_headers",
+    hdrs = glob([
+        "include/uapi/linux/*.h",
+    ]),
+    includes = ["."],
+)

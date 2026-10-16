@@ -1,0 +1,100 @@
+# Bazel file for fastrpc
+# Two modules to be exported - fastrpc, cdsp-loader
+
+package(
+    default_visibility = [
+        "//visibility:public",
+    ],
+)
+
+load(":define_modules.bzl", "define_modules", "define_vm_modules", "define_target_modules")
+
+define_modules("pineapple", "consolidate")
+
+define_modules("pineapple", "gki")
+
+define_modules("blair", "consolidate")
+
+define_modules("blair", "gki")
+
+define_modules("sun", "consolidate")
+
+define_modules("sun", "perf")
+
+define_vm_modules("sun-tuivm", "debug-defconfig")
+define_vm_modules("sun-oemvm", "debug-defconfig")
+
+define_vm_modules("sun-tuivm", "defconfig")
+define_vm_modules("sun-oemvm", "defconfig")
+
+define_vm_modules("canoe-tuivm", "debug-defconfig")
+define_vm_modules("canoe-oemvm", "debug-defconfig")
+
+define_vm_modules("canoe-tuivm", "defconfig")
+define_vm_modules("canoe-oemvm", "defconfig")
+
+define_vm_modules("seraph-tuivm", "debug-defconfig")
+define_vm_modules("seraph-oemvm", "debug-defconfig")
+
+define_vm_modules("seraph-tuivm", "defconfig")
+define_vm_modules("seraph-oemvm", "defconfig")
+
+define_vm_modules("pikachu-tuivm", "debug-defconfig")
+define_vm_modules("pikachu-oemvm", "debug-defconfig")
+
+define_vm_modules("pikachu-tuivm", "defconfig")
+define_vm_modules("pikachu-oemvm", "defconfig")
+
+define_modules("tuna", "consolidate")
+
+define_modules("tuna", "perf")
+
+define_modules("kera", "consolidate")
+
+define_modules("kera", "perf")
+
+define_modules("niobe", "consolidate")
+
+define_modules("niobe", "gki")
+
+define_modules("monaco", "consolidate")
+
+define_modules("monaco", "gki")
+
+define_modules("parrot", "consolidate")
+
+define_modules("parrot", "gki")
+
+define_modules("canoe", "perf")
+
+define_modules("canoe", "consolidate")
+
+define_modules("alor", "perf")
+
+define_modules("alor", "consolidate")
+
+define_modules("hamoa", "perf")
+
+define_modules("hamoa", "consolidate")
+
+define_modules("chora", "perf")
+
+define_modules("chora", "consolidate")
+
+define_modules("alor-le", "debug-defconfig")
+
+define_modules("alor-le", "defconfig")
+
+define_modules("malabar", "consolidate")
+
+define_modules("malabar", "perf")
+
+define_modules("hamoa_la", "consolidate")
+
+define_modules("hamoa_la", "perf")
+
+define_modules("mahua", "consolidate")
+
+define_modules("mahua", "perf")
+
+define_target_modules()

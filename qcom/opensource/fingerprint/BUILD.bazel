@@ -1,0 +1,5 @@
+load(":define_modules.bzl", "define_basic_modules")
+
+targets = ["sun", "canoe", "art", "art16k"]
+variants = ["perf", "gki", "consolidate"]
+define_basic_modules(targets, variants)
