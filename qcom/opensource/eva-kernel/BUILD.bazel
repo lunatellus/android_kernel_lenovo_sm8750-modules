@@ -24,7 +24,6 @@ ddk_headers(
     hdrs = glob([
       "msm/eva/*.h",
       "msm/eva/vm/*.h",
-      "msm/eva/target/*.h",
     ]),
     includes = ["msm","msm/eva"]
 )

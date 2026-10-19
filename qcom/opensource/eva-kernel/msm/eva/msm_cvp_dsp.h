@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * Copyright (c) 2023-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #ifndef MSM_CVP_DSP_H
@@ -49,12 +49,9 @@ struct fastrpc_driver {
 #define DSP_VM_NUM 2
 #define CVP_DSP_MAX_RESERVED 5
 #define CVP_DSP2CPU_RESERVED 7
-#define CVP_DSP2CPU_RESERVED_V2 16
-#define CVP_CPU2DSP_RESERVED_V2 16
 #define CVP_DSP_RESPONSE_TIMEOUT 600
 #define CVP_INVALID_RPMSG_TYPE 0xBADDFACE
 #define MAX_FRAME_BUF_NUM 16
-#define CVP_HW_THREADS_RESERVED 20
 
 #define BITPTRSIZE32 (4)
 #define BITPTRSIZE64 (8)
@@ -66,9 +63,6 @@ struct fastrpc_driver {
 /* Supports up to 8 DSP sessions in 8 processes */
 #define MAX_DSP_SESSION_NUM			(8)
 #define MAX_FASTRPC_DRIVER_NUM		(MAX_DSP_SESSION_NUM)
-
-/* Maxmimum number of buffers to be registered in a batch */
-#define MAX_BUFFER_NUM_REG          (8)
 
 int cvp_dsp_device_init(void);
 void cvp_dsp_device_exit(void);
@@ -107,38 +101,25 @@ enum CVP_DSP_COMMAND {
 	DSP2CPU_START_SESSION = 21,
 	DSP2CPU_STOP_SESSION = 22,
 	DSP2CPU_SET_SESSION_NAME = 23,
-	DSP2CPU_PD_INIT = 24,
-	DSP2CPU_SET_SESSION_CONFIGS = 25,
-	CVP_DSP_MAX_CMD = 26,
+	CVP_DSP_MAX_CMD = 24,
 };
 
 struct eva_power_req {
 	uint32_t clock_fdu;
-	uint32_t clock_mpu;
-	uint32_t clock_od;
 	uint32_t clock_ica;
-	uint32_t clock_vadl;
-	uint32_t clock_tof;
-	uint32_t clock_rge;
-	uint32_t clock_xra;
-	uint32_t clock_lsr;
+	uint32_t clock_od;
+	uint32_t clock_mpu;
 	uint32_t clock_fw;
 	uint32_t bw_ddr;
 	uint32_t bw_sys_cache;
 	uint32_t op_clock_fdu;
-	uint32_t op_clock_mpu;
-	uint32_t op_clock_od;
 	uint32_t op_clock_ica;
-	uint32_t op_clock_vadl;
-	uint32_t op_clock_tof;
-	uint32_t op_clock_rge;
-	uint32_t op_clock_xra;
-	uint32_t op_clock_lsr;
+	uint32_t op_clock_od;
+	uint32_t op_clock_mpu;
 	uint32_t op_clock_fw;
 	uint32_t op_bw_ddr;
 	uint32_t op_bw_sys_cache;
-	uint32_t reserved[CVP_HW_THREADS_RESERVED];
-} __packed;
+};
 
 struct eva_mem_remote {
 	uint32_t type;
@@ -149,12 +130,7 @@ struct eva_mem_remote {
 	uint32_t iova;
 	uint32_t dsp_remote_map;
 	uint64_t v_dsp_addr;
-} __packed;
-
-struct eva_mem_remote_batch {
-	uint32_t cnt;
-	struct eva_mem_remote buffers[MAX_BUFFER_NUM_REG];
-} __packed;
+};
 
 /*
  * command: defined as a packet initiated from one party.
@@ -172,9 +148,9 @@ struct cvp_dsp_cmd_msg {
 	int32_t ret;
 	uint64_t msg_ptr;
 	uint32_t msg_ptr_len;
-	uint32_t transaction_id;
-	uint32_t hfi_version;
-	uint32_t recycle1;
+	uint32_t buff_fd_iova;
+	uint32_t buff_index;
+	uint32_t buff_size;
 	uint32_t session_id;
 	int32_t ddr_type;
 	uint32_t buff_fd;
@@ -191,33 +167,7 @@ struct cvp_dsp_cmd_msg {
 
 	uint32_t reserved1;
 	uint32_t reserved2;
-} __packed;
-
-struct cvp_dsp_cmd_header {
-	uint32_t type;
-	uint32_t ver;
-	uint32_t len;
-} __packed;
-
-struct cvp_cpu2dsp_cmd_v2 {
-	struct cvp_dsp_cmd_header header;
-	int32_t ret;
-	uint64_t hfi_queue_ptr;
-	uint32_t hfi_queue_size;
-	uint32_t session_id;
-	int32_t ddr_type;
-	uint32_t hfi_version;
-
-	uint32_t eva_dsp_debug_mask;
-
-	/* Create Session */
-	uint32_t session_cpu_low;
-	uint32_t session_cpu_high;
-
-	uint32_t reserved1;
-	uint32_t reserved2;
-	uint32_t data[CVP_CPU2DSP_RESERVED_V2];
-} __packed;
+};
 
 /* cvp_dsp_rsp_msg contains the message sent from DSP to CPU */
 struct cvp_dsp_rsp_msg {
@@ -225,7 +175,7 @@ struct cvp_dsp_rsp_msg {
 	int32_t ret;
 	uint32_t dsp_state;
 	uint32_t reserved[CVP_DSP_MAX_RESERVED - 1];
-} __packed;
+};
 
 /* cvp_dsp2cpu_cmd contains the command sent from DSP to cpu*/
 struct cvp_dsp2cpu_cmd {
@@ -251,23 +201,7 @@ struct cvp_dsp2cpu_cmd {
 	char session_name[SESSION_NAME_MAX_LEN];
 
 	uint32_t data[CVP_DSP2CPU_RESERVED];
-} __packed;
-
-struct cvp_dsp2cpu_cmd_v2 {
-	struct cvp_dsp_cmd_header header;
-	uint32_t session_id;
-	uint32_t session_cpu_low;
-	uint32_t session_cpu_high;
-	int32_t pid;
-	char session_name[SESSION_NAME_MAX_LEN];
-	struct eva_power_req power_req;
-	struct eva_mem_remote_batch sbuf_batch;
-	struct eva_kmd_sys_properties prop_data;
-
-	uint32_t transaction_id;
-
-	uint32_t data[CVP_DSP2CPU_RESERVED_V2];
-} __packed;
+};
 
 struct driver_name {
     uint32_t status;
@@ -291,12 +225,6 @@ struct cvp_dsp_fastrpc_driver_entry {
 	struct completion fastrpc_probe_completion;
 	/* all dsp sessions list */
 	struct msm_cvp_list dsp_sessions;
-
-	/* dsp buffer lists*/
-	struct msm_cvp_list cvpdspbufs;
-	struct cvp_frame_bufs unused_dsp_bufs;
-	atomic_t smem_count;
-	atomic_t dsp_usage;
 };
 
 struct cvp_dsp_apps {
@@ -315,9 +243,7 @@ struct cvp_dsp_apps {
 	uint64_t addr;
 	uint32_t size;
 	struct completion completions[CPU2DSP_MAX_CMD + 1];
-	struct cvp_dsp_cmd_header pending_dsp2cpu_cmd_header; //ALEX: Remove
 	struct cvp_dsp2cpu_cmd pending_dsp2cpu_cmd;
-	struct cvp_dsp2cpu_cmd_v2 pending_dsp2cpu_cmd_v2;
 	struct cvp_dsp_rsp_msg pending_dsp2cpu_rsp;
 	struct task_struct *dsp_thread;
 	/* dsp buffer mapping, set of dma function pointer */
@@ -344,26 +270,25 @@ struct cvp_dsp_trace_buf {
 	u32	buf_idx;
 	u32	transaction_id;
 	u32	fd;
-} __packed;
+};
 
 // Saving config packet for each intance
 struct cvp_dsp_trace_instance {
 	u32    feature_type;
 	u32    config_pkt[CONFIG_SIZE_IN_WORDS];
-} __packed;
+};
 
 struct cvp_dsp_trace_session {
 	u32                session_id;
-	u32                handle;
 	u32                buf_cnt;
 	u32                inst_cnt;
 	struct cvp_dsp_trace_instance  instance[EVA_TRACE_MAX_INSTANCE_NUM];
 	struct cvp_dsp_trace_buf       buf[EVA_TRACE_MAX_BUF_NUM];
-} __packed;
+};
 
 struct cvp_dsp_trace {
 	struct cvp_dsp_trace_session   sessions[EVA_TRACE_MAX_SESSION_NUM];
-} __packed;
+};
 
 extern struct cvp_dsp_apps gfa_cv;
 /*

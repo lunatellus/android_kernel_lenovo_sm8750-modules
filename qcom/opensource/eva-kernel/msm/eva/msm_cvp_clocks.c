@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include "msm_cvp_common.h"
@@ -77,28 +77,6 @@ int msm_cvp_mmrm_notifier_cb(
 	}
 
 	return 0;
-}
-
-int msm_cvp_set_fmax(struct msm_cvp_core *core)
-{
-	struct cvp_hfi_ops *ops_tbl;
-	struct allowed_clock_rates_table *tbl = NULL;
-	unsigned int tbl_size, max_rate;
-	int rc;
-
-	if (!core || !core->dev_ops) {
-		dprintk(CVP_ERR, "%s Invalid args: %pK\n", __func__, core);
-		return -EINVAL;
-	}
-
-	tbl = core->resources.allowed_clks_tbl;
-	tbl_size = core->resources.allowed_clks_tbl_size;
-	max_rate = tbl[tbl_size - 1].clock_rate;
-	ops_tbl = core->dev_ops;
-	rc = call_hfi_op(ops_tbl, scale_clocks,
-		ops_tbl->hfi_device_data, max_rate);
-
-	return rc;
 }
 
 int msm_cvp_set_clocks(struct msm_cvp_core *core)

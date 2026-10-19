@@ -1,10 +1,11 @@
-/* SPDX-License-Identifier: GPL-2.0-only */
-/*
+/**
+ * SPDX-License-Identifier: GPL-2.0-only
+ *
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.​
+ * Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
-/*
+/**
  * This file contains definitions that are common to UMD and KMD
  * but shall not be added to the UAPI to allow for better UAPI
  * backward compatibility. Identical copies of this file must be
@@ -13,6 +14,24 @@
 
 #ifndef _EVA_SHARED_DEF_H_
 #define _EVA_SHARED_DEF_H_
+
+/**
+ * Structure corresponding to HFI_CVP_BUFFER_TYPE
+ */
+
+struct cvp_buf_type {
+	__s32 fd;
+	__u32 size;
+	__u32 offset;
+	__u32 flags;
+	__u32 reserved1;
+	__u32 reserved2;
+	__u32 fence_type;
+	__u32 input_handle;
+	__u32 output_handle;
+	__u32 debug_flags;
+	__u32 crc;
+};
 
 /**
  * Structures and macros for Warp-NCC Out-of-Band (OOB) buffer

@@ -1,17 +1,18 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.​
+ * Copyright (c) 2023-2025 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #ifndef __H_CVP_CORE_HFI_H__
 #define __H_CVP_CORE_HFI_H__
 
 #include "cvp_hfi_api.h"
+#include "cvp_hfi_helper.h"
+#include "cvp_hfi_api.h"
 #include "cvp_hfi.h"
 #include "msm_cvp_resources.h"
 #include "hfi_packetization.h"
-#include "cvp_comm_def.h"
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/mutex.h>
@@ -102,7 +103,6 @@ struct cvp_hfi_mem_map {
 
 #define ALIGNED_QDSS_SIZE ALIGN(QDSS_SIZE, SZ_4K)
 #define ALIGNED_SFR_SIZE ALIGN(SFR_SIZE, SZ_4K)
-#define ALIGNED_SW_DBG_BUF_SIZE ALIGN(SW_DBG_BUF_SIZE, SZ_4K)
 #define ALIGNED_QUEUE_SIZE ALIGN(QUEUE_SIZE, SZ_4K)
 #define SHARED_QSIZE ALIGN(ALIGNED_SFR_SIZE + ALIGNED_QUEUE_SIZE + \
 			ALIGNED_QDSS_SIZE, SZ_1M)
@@ -151,12 +151,6 @@ struct cvp_iface_q_info {
 /* Regular set helpers */
 #define iris_hfi_for_each_regulator(__device, __rinfo) \
 	iris_hfi_for_each_thing(__device, __rinfo, regulator)
-
-#define iris_hfi_for_each_pwr_domain(__device, __pdinfo) \
-	iris_hfi_for_each_thing(__device, __pdinfo, pd)
-
-#define iris_hfi_for_each_pwr_domain_reverse(__device, __pdinfo) \
-	iris_hfi_for_each_thing_reverse(__device, __pdinfo, pd)
 
 #define iris_hfi_for_each_regulator_reverse(__device, __rinfo) \
 	iris_hfi_for_each_thing_reverse(__device, __rinfo, regulator)
@@ -207,7 +201,6 @@ struct cvp_hal_data {
 	phys_addr_t firmware_base;
 	u8 __iomem *register_base;
 	u8 __iomem *gcc_reg_base;
-	u8 __iomem *tcsr_reg_base;
 	u32 register_size;
 	u32 gcc_reg_size;
 };
@@ -251,9 +244,10 @@ struct cvp_hal_ops {
 	int (*set_registers)(struct iris_hfi_device *device);
 	void (*dump_noc_regs)(struct iris_hfi_device *device);
 	int (*enable_hw_power_collapse)(struct iris_hfi_device *device);
-	void (*check_tensilica_in_reset)(struct iris_hfi_device *device);
-	void (*noc_lpi)(struct iris_hfi_device *device,
-						enum enter_noc_lpi_caller caller);
+	int (*reset_control_assert_name)(struct iris_hfi_device *device, const char *name);
+	int (*reset_control_deassert_name)(struct iris_hfi_device *device, const char *name);
+	int (*reset_control_acquire_name)(struct iris_hfi_device *device, const char *name);
+	int (*reset_control_release_name)(struct iris_hfi_device *device, const char *name);
 };
 
 struct iris_hfi_device {
@@ -295,10 +289,6 @@ struct iris_hfi_device {
 	unsigned int skip_pc_count;
 	struct msm_cvp_capability *sys_init_capabilities;
 	struct cvp_hal_ops *hal_ops;
-#ifdef CVP_SW_DBG_BUF_ENABLED
-	struct cvp_mem_addr sw_dbg_buf;
-#endif
-	u32 global_pm_qos_latency_us;
 };
 
 irqreturn_t cvp_hfi_isr(int irq, void *dev);
@@ -318,57 +308,51 @@ struct msm_cvp_inst *cvp_get_inst_from_id(struct msm_cvp_core *core,
 
 #define msm_cvp_cmd_tracing_from_sw(cmd_hdr, tag) ({ \
 	if (((msm_cvp_debug & CVP_TRACE) == CVP_TRACE) && \
-			(cmd_hdr->header.packet_type > HFI_CMD_SESSION_CONFIG_OFFSET) && \
-			(cmd_hdr->header.size >= sizeof(struct cvp_hfi_cmd_session_hdr))) { \
+			(cmd_hdr->packet_type > HFI_CMD_SESSION_CVP_START) && \
+			(cmd_hdr->size >= sizeof(struct cvp_hfi_cmd_session_hdr))) { \
 		u64 aon_cycles = 0; \
 		u32 sess_id = 0; \
 		u32 pkt_id = 0; \
 		u32 stream_id = 0; \
-		u64 t_id = 0; \
-		const char *command_name = ""; \
-		sess_id = cmd_hdr->header.session_id; \
-		pkt_id  = cmd_hdr->header.packet_type; \
-		command_name = get_pkt_name_from_type(pkt_id); \
-		stream_id = cmd_hdr->header.stream_idx; \
-		t_id    = cmd_hdr->header.client_data.transaction_id; \
+		u32 t_id = 0; \
 		u64 ktid = 0; \
+		sess_id = cmd_hdr->session_id; \
+		pkt_id  = cmd_hdr->packet_type; \
+		stream_id = cmd_hdr->stream_idx; \
+		t_id    = cmd_hdr->client_data.transaction_id; \
 		aon_cycles  = get_aon_time(); \
-		ktid = (cmd_hdr->header.client_data.kdata  & (FENCE_BIT - 1)); \
+		ktid = (cmd_hdr->client_data.kdata  & (FENCE_BIT - 1)); \
 		trace_tracing_eva_frame_from_sw(aon_cycles, tag, sess_id, \
-			stream_id, pkt_id, command_name, t_id, ktid); \
-		dprintk(CVP_INFO, \
+			stream_id, pkt_id, t_id, ktid); \
+		dprintk(CVP_ERR, \
 			"tracing_eva_frame_from_sw: AON_TIMESTAMP: %llu %s session_id = 0x%x "\
-			"stream_id = 0x%x packet_id = 0x%x command_name = %s "\
-			"transaction_id = 0x%x ktid = 0x%x\n",\
-			aon_cycles, tag, sess_id, stream_id, pkt_id, command_name, t_id, ktid); \
+			"stream_id = 0x%x packet_id = 0x%x transaction_id = 0x%x ktid = 0x%x\n",\
+			aon_cycles, tag, sess_id, stream_id, pkt_id, t_id, ktid); \
 	} \
 })
 
 #define msm_cvp_msg_tracing_from_sw(msg_hdr, tag) ({ \
 	if (((msm_cvp_debug & CVP_TRACE) == CVP_TRACE) && \
-			(msg_hdr->header.packet_type > HFI_MSG_SESSION_EVA_OFFSET) && \
-			(msg_hdr->header.size >= sizeof(struct cvp_hfi_msg_session_hdr))) { \
+			(msg_hdr->packet_type > HFI_MSG_SESSION_CVP_START) && \
+			(msg_hdr->size >= sizeof(struct cvp_hfi_msg_session_hdr))) { \
 		u64 aon_cycles = 0; \
 		u32 pkt_id = 0; \
 		u32 stream_id = 0; \
-		u64 t_id = 0; \
+		u32 t_id = 0; \
 		u64 ktid = 0; \
-		const char *command_name = ""; \
 		unsigned int session_id; \
-		session_id   = msg_hdr->header.session_id; \
-		pkt_id    = msg_hdr->header.packet_type; \
-		command_name = get_pkt_name_from_type(pkt_id); \
-		stream_id = msg_hdr->header.stream_idx; \
-		t_id      = msg_hdr->header.client_data.transaction_id; \
+		session_id   = msg_hdr->session_id; \
+		pkt_id    = msg_hdr->packet_type; \
+		stream_id = msg_hdr->stream_idx; \
+		t_id      = msg_hdr->client_data.transaction_id; \
 		aon_cycles  = get_aon_time(); \
-		ktid = (msg_hdr->header.client_data.kdata  & (FENCE_BIT - 1)); \
+		ktid = (msg_hdr->client_data.kdata  & (FENCE_BIT - 1)); \
 		trace_tracing_eva_frame_from_sw(aon_cycles, tag, session_id, \
-			stream_id, pkt_id, command_name, t_id, ktid); \
-		dprintk(CVP_INFO,\
+			stream_id, pkt_id, t_id, ktid); \
+		dprintk(CVP_ERR,\
 			"tracing_eva_frame_from_sw: AON_TIMESTAMP: %llu %s session_id = 0x%x "\
-			"stream_id = 0x%x packet_id = 0x%x command_name = %s "\
-			"transaction_id = 0x%x ktid = 0x%x\n",\
-			aon_cycles, tag, session_id, stream_id, pkt_id, command_name, t_id, ktid); \
+			"stream_id = 0x%x packet_id = 0x%x transaction_id = 0x%x ktid = 0x%x\n",\
+			aon_cycles, tag, session_id, stream_id, pkt_id, t_id, ktid); \
 	} \
 })
 

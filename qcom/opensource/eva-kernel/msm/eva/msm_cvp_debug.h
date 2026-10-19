@@ -25,24 +25,23 @@
  */
 
 enum cvp_msg_prio {
-	CVP_ERR   = 0x000001,
-	CVP_WARN  = 0x000002,
-	CVP_INFO  = 0x000004,
-	CVP_CMD   = 0x000008,
-	CVP_PROF  = 0x000010,
-	CVP_PKT   = 0x000020,
-	CVP_MEM   = 0x000040,
-	CVP_SYNX  = 0x000080,
-	CVP_CORE  = 0x000100,
-	CVP_REG   = 0x000200,
-	CVP_PWR   = 0x000400,
-	CVP_DSP   = 0x000800,
-	CVP_FW    = 0x001000,
-	CVP_SESS  = 0x002000,
-	CVP_HFI   = 0x004000,
-	CVP_VM    = 0x008000,
-	CVP_TRACE = 0x010000,
-	CVP_PERF  = 0x020000,
+	CVP_ERR  = 0x000001,
+	CVP_WARN = 0x000002,
+	CVP_INFO = 0x000004,
+	CVP_CMD  = 0x000008,
+	CVP_PROF = 0x000010,
+	CVP_PKT  = 0x000020,
+	CVP_MEM  = 0x000040,
+	CVP_SYNX = 0x000080,
+	CVP_CORE = 0x000100,
+	CVP_REG  = 0x000200,
+	CVP_PWR  = 0x000400,
+	CVP_DSP  = 0x000800,
+	CVP_FW   = 0x001000,
+	CVP_SESS = 0x002000,
+	CVP_HFI  = 0x004000,
+	CVP_VM   = 0x008000,
+	CVP_TRACE = 0x0010000,
 	CVP_DBG  = CVP_MEM | CVP_SYNX | CVP_CORE | CVP_REG | CVP_CMD |
 		CVP_PWR | CVP_DSP | CVP_SESS | CVP_HFI | CVP_PKT | CVP_VM,
 };
@@ -78,10 +77,6 @@ extern int cvp_kernel_fence_enabled;
 extern int msm_cvp_hw_wd_recovery;
 extern int msm_cvp_smmu_fault_recovery;
 extern int msm_cvp_session_error_recovery;
-extern int msm_cvp_hw_hang_recovery;
-#ifdef CVP_SW_DBG_BUF_ENABLED
-extern int msm_cvp_sw_dbg_buf_dump;
-#endif
 
 #define dprintk(__level, __fmt, arg...)	\
 	do { \
@@ -116,7 +111,7 @@ extern int msm_cvp_sw_dbg_buf_dump;
 
 #define MSM_CVP_ERROR(value)					\
 	do {	if (value)					\
-			dprintk(CVP_ERR, "WarnOn");		\
+			dprintk(CVP_ERR, "BugOn");		\
 		WARN_ON(value);					\
 	} while (0)
 
@@ -165,8 +160,6 @@ static inline char *get_debug_level_str(int level)
 		return "hfi";
 	case CVP_VM:
 		return "vm";
-	case CVP_PERF:
-		return "perf";
 	default:
 		return "???";
 	}

@@ -1,12 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.​
+ * Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 #ifndef __HFI_PACKETIZATION__
 #define __HFI_PACKETIZATION__
 
 #include <linux/types.h>
+#include "cvp_hfi_helper.h"
 #include "cvp_hfi.h"
 #include "cvp_hfi_api.h"
 
@@ -69,6 +70,7 @@ struct cvp_hfi_packetization_ops {
 		struct cvp_hfi_cmd_session_sync_process_packet *pkt,
 		struct cvp_hal_session *session);
 	int (*session_send)(
+			struct eva_kmd_hfi_packet *out_pkt,
 			struct cvp_hal_session *session,
 			struct eva_kmd_hfi_packet *in_pkt);
 };

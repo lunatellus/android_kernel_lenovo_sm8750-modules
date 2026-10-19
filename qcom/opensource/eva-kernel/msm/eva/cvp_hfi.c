@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * Copyright (c) 2023-2024, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <asm/memory.h>
@@ -14,14 +14,12 @@
 #include <linux/iopoll.h>
 #include <linux/of.h>
 #include <linux/pm_qos.h>
-#include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
 #include <linux/platform_device.h>
 #include <linux/soc/qcom/llcc-qcom.h>
 #include <linux/version.h>
-#include <linux/pm_domain.h>
 #if (KERNEL_VERSION(6, 3, 0) <= LINUX_VERSION_CODE)
 #include <linux/firmware/qcom/qcom_scm.h>
 #else
@@ -34,7 +32,7 @@
 #include "hfi_packetization.h"
 #include "msm_cvp_debug.h"
 #include "cvp_core_hfi.h"
-#include "cvp_hfi.h"
+#include "cvp_hfi_helper.h"
 #include "cvp_hfi_io.h"
 #include "msm_cvp_dsp.h"
 #include "msm_cvp_clocks.h"
@@ -43,8 +41,6 @@
 #include "msm_cvp_events.h"
 #include "cvp_comm_def.h"
 #include "cvp_presil.h"
-#include "target/cvp_kaanapali_hal.h"
-#include "msm_cvp.h"
 
 // ysi - added for debug
 #include <linux/clk/qcom.h>
@@ -61,7 +57,6 @@ struct cvp_tzbsp_memprot {
 	u32 cp_nonpixel_size;
 };
 
-struct cvp_hal_ops hal_ops;
 #define TZBSP_CVP_PAS_ID    26
 
 /* Poll interval in uS */
@@ -71,6 +66,7 @@ const struct msm_cvp_gov_data CVP_DEFAULT_BUS_VOTE = {
 	.data = NULL,
 	.data_count = 0,
 };
+
 const int cvp_max_packets = 32;
 static enum cvp_irq_state cur_irq_state = CVP_IRQ_CLEAR;
 
@@ -98,17 +94,23 @@ static int __release_subcaches(struct iris_hfi_device *device);
 static int __disable_subcaches(struct iris_hfi_device *device);
 static int __power_collapse(struct iris_hfi_device *device, bool force);
 static int iris_hfi_noc_error_info(void *dev);
-static void __deinit_resources(struct iris_hfi_device *device);
 
+static void interrupt_init_iris2(struct iris_hfi_device *device);
+static void setup_dsp_uc_memmap_vpu5(struct iris_hfi_device *device);
 static void power_off_iris2(struct iris_hfi_device *device);
 
 static int __set_ubwc_config(struct iris_hfi_device *device);
+static void __noc_error_info_iris2(struct iris_hfi_device *device);
+static int __disable_hw_power_collapse(struct iris_hfi_device *device);
 
 static int __hwfence_regs_map(struct iris_hfi_device *device);
 static int __hwfence_regs_unmap(struct iris_hfi_device *device);
 
-static int __enable_power_domain(struct iris_hfi_device *device, const char *name);
-static int __disable_power_domain(struct iris_hfi_device *device, const char *name);
+static int __reset_control_assert_name(struct iris_hfi_device *device, const char *name);
+static int __reset_control_deassert_name(struct iris_hfi_device *device, const char *name);
+static int __reset_control_acquire(struct iris_hfi_device *device, const char *name);
+static int __reset_control_release(struct iris_hfi_device *device, const char *name);
+static void __deinit_resources(struct iris_hfi_device *device);
 
 static int cvp_iommu_map(struct iommu_domain* domain, unsigned long iova, phys_addr_t paddr, size_t size, int prot)
 {
@@ -127,6 +129,75 @@ static int cvp_iommu_map(struct iommu_domain* domain, unsigned long iova, phys_a
 #endif
 	return rc;
 }
+
+
+#ifdef CONFIG_EVA_PINEAPPLE
+
+/* EVA 4.0 power sequence */
+static int __power_on_controller(struct iris_hfi_device *device);
+static int __power_on_core(struct iris_hfi_device *device);
+static int __power_off_controller(struct iris_hfi_device *device);
+static int __power_off_core(struct iris_hfi_device *device);
+static int __check_ctl_power_on(struct iris_hfi_device *device);
+static int __check_core_power_on(struct iris_hfi_device *device);
+static void __print_sidebandmanager_regs(struct iris_hfi_device *device);
+static int __enable_hw_power_collapse(struct iris_hfi_device *device);
+static int __set_registers(struct iris_hfi_device *device);
+static void __dump_noc_regs(struct iris_hfi_device *device);
+
+static struct cvp_hal_ops hal_ops = {
+	.interrupt_init = interrupt_init_iris2,
+	.setup_dsp_uc_memmap = setup_dsp_uc_memmap_vpu5,
+	.power_off_controller = __power_off_controller,
+	.power_off_core = __power_off_core,
+	.power_on_controller = __power_on_controller,
+	.power_on_core = __power_on_core,
+	.noc_error_info = __noc_error_info_iris2,
+	.check_ctl_power_on = __check_ctl_power_on,
+	.check_core_power_on = __check_core_power_on,
+	.print_sbm_regs = __print_sidebandmanager_regs,
+	.enable_hw_power_collapse = __enable_hw_power_collapse,
+	.set_registers = __set_registers,
+	.dump_noc_regs = __dump_noc_regs,
+	.reset_control_assert_name = __reset_control_assert_name,
+	.reset_control_deassert_name = __reset_control_deassert_name,
+	.reset_control_acquire_name = __reset_control_acquire,
+	.reset_control_release_name = __reset_control_release,
+};
+#elif CONFIG_EVA_SUN
+
+/* EVA 4.1 power sequence */
+static int __power_on_controller_v1(struct iris_hfi_device *device);
+static int __power_on_core_v1(struct iris_hfi_device *device);
+static int __power_off_controller_v1(struct iris_hfi_device *device);
+static int __power_off_core_v1(struct iris_hfi_device *device);
+static int __check_ctl_power_on_v1(struct iris_hfi_device *device);
+static int __check_core_power_on_v1(struct iris_hfi_device *device);
+static void __print_sidebandmanager_regs_v1(struct iris_hfi_device *device);
+static int __enable_hw_power_collapse_v1(struct iris_hfi_device *device);
+static int __set_registers_v1(struct iris_hfi_device *device);
+static void __dump_noc_regs_v1(struct iris_hfi_device *device);
+
+static struct cvp_hal_ops hal_ops = {
+	.interrupt_init = interrupt_init_iris2,
+	.setup_dsp_uc_memmap = setup_dsp_uc_memmap_vpu5,
+	.power_off_controller = __power_off_controller_v1,
+	.power_off_core = __power_off_core_v1,
+	.power_on_controller = __power_on_controller_v1,
+	.power_on_core = __power_on_core_v1,
+	.noc_error_info = __noc_error_info_iris2,
+	.check_ctl_power_on = __check_ctl_power_on_v1,
+	.check_core_power_on = __check_core_power_on_v1,
+	.print_sbm_regs = __print_sidebandmanager_regs_v1,
+	.enable_hw_power_collapse = __enable_hw_power_collapse_v1,
+	.set_registers = __set_registers_v1,
+	.dump_noc_regs = __dump_noc_regs_v1,
+	.reset_control_assert_name = __reset_control_assert_name,
+	.reset_control_deassert_name = __reset_control_deassert_name,
+	.reset_control_acquire_name = __reset_control_acquire,
+	.reset_control_release_name = __reset_control_release,
+};
+#endif
 
 /**
  * Utility function to enforce some of our assumptions.  Spam calls to this
@@ -189,6 +260,7 @@ unsigned int get_msg_size(struct cvp_hfi_msg_session_hdr *hdr)
 {
 	struct msm_cvp_core *core;
 	struct iris_hfi_device *device;
+	u32 minor_ver;
 
 	core = cvp_driver->cvp_core;
 	if (core)
@@ -200,9 +272,15 @@ unsigned int get_msg_size(struct cvp_hfi_msg_session_hdr *hdr)
 		dprintk(CVP_ERR, "%s: NULL device\n", __func__);
 		return 0;
 	}
-	//TEMP_WORKAROUND
-	if (hdr->header.packet_type == HFI_MSG_SESSION_CVP_RELEASE_BUFFERS)
-		return sizeof(struct cvp_hfi_msg_session_hdr_old_format);
+
+	minor_ver = (device->version & HFI_VERSION_MINOR_MASK) >>
+				HFI_VERSION_MINOR_SHIFT;
+
+	if (minor_ver < 2)
+		return sizeof(struct cvp_hfi_msg_session_hdr);
+
+	if (hdr->packet_type == HFI_MSG_SESSION_CVP_FD)
+		return sizeof(struct cvp_hfi_msg_session_hdr_ext);
 	else
 		return sizeof(struct cvp_hfi_msg_session_hdr);
 
@@ -213,7 +291,7 @@ unsigned int get_msg_session_id(void *msg)
 	struct cvp_hfi_msg_session_hdr *hdr =
 		(struct cvp_hfi_msg_session_hdr *)msg;
 
-	return hdr->header.session_id;
+	return hdr->session_id;
 }
 
 unsigned int get_msg_errorcode(void *msg)
@@ -314,35 +392,7 @@ static int __dsp_shutdown(struct iris_hfi_device *device)
 	return rc;
 }
 
-/* Function to switch core GDSC bw SW control and HW control.
- * Make sure controller GDSC and controller clock are ON before
- * calling this function.
- * Don't call this function from interrupt/atomic context.
- * Call this in place of __acquire_regulator, hand_off_regulator.
- *
- */
-int switch_core_gdsc_mode(struct iris_hfi_device *device, enum core_gdsc_dest dest)
-{
-	int rc = 0;
-	struct power_domain_info *pd_info;
-
-	iris_hfi_for_each_pwr_domain(device, pd_info) {
-		if (pd_info->has_hw_power_collapse) {
-			dprintk(CVP_CORE, "Moving core GDSC to %s\n",
-						dest?"HW control":"SW control");
-			rc = dev_pm_genpd_set_hwmode(pd_info->pd_device, (bool)dest);
-			if (rc) {
-				dprintk(CVP_ERR, "Failed to move core GDSC to %s\n",
-						dest?"HW control":"SW control");
-			}
-			break;
-		}
-	}
-
-	return rc;
-}
-
-int __acquire_regulator(struct regulator_info *rinfo,
+static int __acquire_regulator(struct regulator_info *rinfo,
 				struct iris_hfi_device *device)
 {
 	int rc = 0;
@@ -377,7 +427,7 @@ int __acquire_regulator(struct regulator_info *rinfo,
 	return rc;
 }
 
-int __hand_off_regulator(struct regulator_info *rinfo)
+static int __hand_off_regulator(struct regulator_info *rinfo)
 {
 	int rc = 0;
 
@@ -398,7 +448,7 @@ int __hand_off_regulator(struct regulator_info *rinfo)
 	return rc;
 }
 
-int __hand_off_regulators(struct iris_hfi_device *device)
+static int __hand_off_regulators(struct iris_hfi_device *device)
 {
 	struct regulator_info *rinfo;
 	int rc = 0, c = 0;
@@ -427,18 +477,14 @@ static int __take_back_regulators(struct iris_hfi_device *device)
 	struct regulator_info *rinfo;
 	int rc = 0;
 
-	if (device->res->gdsc_framework_type) {
-		rc = switch_core_gdsc_mode(device, TO_SW_CTRL);
-	} else {
-		iris_hfi_for_each_regulator(device, rinfo) {
-			rc = __acquire_regulator(rinfo, device);
-			/*
-			 * if one regulator hand off failed, driver should take
-			 * the control for other regulators back.
-			 */
-			if (rc)
-				return rc;
-		}
+	iris_hfi_for_each_regulator(device, rinfo) {
+		rc = __acquire_regulator(rinfo, device);
+		/*
+		 * if one regulator hand off failed, driver should take
+		 * the control for other regulators back.
+		 */
+		if (rc)
+			return rc;
 	}
 
 	return rc;
@@ -470,12 +516,15 @@ static int __write_queue(struct cvp_iface_q_info *qinfo, u8 *packet,
 
 	cmd_pkt = (struct cvp_hfi_cmd_session_hdr *)packet;
 
-	if (cmd_pkt->header.size >= sizeof(struct cvp_hfi_cmd_session_hdr))
+	if (cmd_pkt->size >= sizeof(struct cvp_hfi_cmd_session_hdr))
 		dprintk(CVP_CMD, "%s: pkt_type %08x sess_id %08x trans_id %u ktid %llu\n",
-			__func__, cmd_pkt->header.packet_type,
-			cmd_pkt->header.session_id,
-			cmd_pkt->header.client_data.transaction_id,
-			cmd_pkt->header.client_data.kdata & (FENCE_BIT - 1));
+			__func__, cmd_pkt->packet_type,
+			cmd_pkt->session_id,
+			cmd_pkt->client_data.transaction_id,
+			cmd_pkt->client_data.kdata & (FENCE_BIT - 1));
+	else if (cmd_pkt->size >= 12)
+		dprintk(CVP_CMD, "%s: pkt_type %08x sess_id %08x\n", __func__,
+			cmd_pkt->packet_type, cmd_pkt->session_id);
 
 	if (msm_cvp_debug & CVP_PKT) {
 		dprintk(CVP_PKT, "%s: %pK\n", __func__, qinfo);
@@ -551,7 +600,7 @@ static int __read_queue(struct cvp_iface_q_info *qinfo, u8 *packet,
 {
 	struct cvp_hfi_queue_header *queue;
 	struct cvp_hfi_msg_session_hdr *msg_pkt;
-	u32 packet_size_in_words, new_read_idx, packet_size_in_bytes;
+	u32 packet_size_in_words, new_read_idx;
 	u32 *read_ptr;
 	u32 receive_request = 0;
 	u32 read_idx, write_idx;
@@ -624,7 +673,6 @@ static int __read_queue(struct cvp_iface_q_info *qinfo, u8 *packet,
 	}
 
 	packet_size_in_words = (*read_ptr) >> 2;
-	packet_size_in_bytes = *read_ptr;
 	if (!packet_size_in_words) {
 		spin_unlock(&qinfo->hfi_lock);
 		dprintk(CVP_ERR, "Zero packet size\n");
@@ -651,7 +699,7 @@ static int __read_queue(struct cvp_iface_q_info *qinfo, u8 *packet,
 		 * the packet from a shared queue, there is a possibility to get the
 		 * packet->size data corrupted of shared queue by mallicious FW.
 		 */
-		*((u32 *) packet) = packet_size_in_bytes;
+		*((u32 *) packet) = packet_size_in_words << 2;
 	} else {
 		dprintk(CVP_WARN,
 			"BAD packet received, read_idx: %#x, pkt_size: %d\n",
@@ -680,10 +728,10 @@ static int __read_queue(struct cvp_iface_q_info *qinfo, u8 *packet,
 		msg_pkt = (struct cvp_hfi_msg_session_hdr *)packet;
 		dprintk(CVP_CMD, "%s:  "
 			"pkt_type %08x sess_id %08x trans_id %u ktid %llu\n",
-			__func__, msg_pkt->header.packet_type,
-			msg_pkt->header.session_id,
-			msg_pkt->header.client_data.transaction_id,
-			msg_pkt->header.client_data.kdata & (FENCE_BIT - 1));
+			__func__, msg_pkt->packet_type,
+			msg_pkt->session_id,
+			msg_pkt->client_data.transaction_id,
+			msg_pkt->client_data.kdata & (FENCE_BIT - 1));
 	}
 
 	if ((msm_cvp_debug & CVP_PKT) &&
@@ -696,7 +744,7 @@ static int __read_queue(struct cvp_iface_q_info *qinfo, u8 *packet,
 }
 
 static int __smem_alloc(struct iris_hfi_device *dev, struct cvp_mem_addr *mem,
-			u32 size, u32 align, u32 flags, int user_access)
+			u32 size, u32 align, u32 flags)
 {
 	struct msm_cvp_smem *alloc = &mem->mem_data;
 	int rc = 0;
@@ -708,7 +756,7 @@ static int __smem_alloc(struct iris_hfi_device *dev, struct cvp_mem_addr *mem,
 
 	dprintk(CVP_INFO, "start to alloc size: %d, flags: %d\n", size, flags);
 	alloc->flags = flags;
-	rc = msm_cvp_smem_alloc(size, align, 1, (void *)dev->res, alloc, user_access);
+	rc = msm_cvp_smem_alloc(size, align, 1, (void *)dev->res, alloc);
 	if (rc) {
 		dprintk(CVP_ERR, "Alloc failed\n");
 		rc = -ENOMEM;
@@ -739,7 +787,7 @@ static void __smem_free(struct iris_hfi_device *dev, struct msm_cvp_smem *mem)
 	msm_cvp_smem_free(mem);
 }
 
-void __write_register(struct iris_hfi_device *device,
+static void __write_register(struct iris_hfi_device *device,
 		u32 reg, u32 value)
 {
 	u32 hwiosymaddr = reg;
@@ -752,17 +800,17 @@ void __write_register(struct iris_hfi_device *device,
 
 	__strict_check(device);
 
-	base_addr = device->cvp_hal_data->register_base;
-	dprintk(CVP_REG, "Base addr: %pK, written to: %#x, Value: %#x...\n",
-		base_addr, hwiosymaddr, value);
-	base_addr += hwiosymaddr;
-
 	if (!device->power_enabled) {
 		dprintk(CVP_WARN,
 			"HFI Write register failed : Power is OFF\n");
 		msm_cvp_res_handle_fatal_hw_error(device->res, true);
 		return;
 	}
+
+	base_addr = device->cvp_hal_data->register_base;
+	dprintk(CVP_REG, "Base addr: %pK, written to: %#x, Value: %#x...\n",
+		base_addr, hwiosymaddr, value);
+	base_addr += hwiosymaddr;
 
 #ifdef USE_PRESIL42
 	presil42_write_register(device, reg, value);
@@ -777,50 +825,7 @@ void __write_register(struct iris_hfi_device *device,
 	wmb();
 }
 
-
-int __read_tcsr_register(struct iris_hfi_device *device, u32 reg)
-{
-	int rc = 0;
-	u8 *base_addr;
-
-	if (!device) {
-		dprintk(CVP_ERR, "Invalid params: %pK\n", device);
-		return -EINVAL;
-	}
-
-	__strict_check(device);
-
-	if (!device->power_enabled) {
-		dprintk(CVP_WARN,
-			"%s HFI Read register failed : Power is OFF\n",
-			__func__);
-		msm_cvp_res_handle_fatal_hw_error(device->res, true);
-		return -EINVAL;
-	}
-
-	base_addr = device->cvp_hal_data->tcsr_reg_base;
-
-	if (!base_addr) {
-		dprintk(CVP_WARN,
-			"%s: TCSR Registers not mapped\n",
-			__func__);
-		return -EINVAL;
-	}
-
-	rc = readl_relaxed(base_addr + reg);
-	/*
-	 * Memory barrier to make sure value is read correctly from the
-	 * register.
-	 */
-	rmb();
-	dprintk(CVP_REG,
-		"TCSR Base addr: %pK, read from: %#x, value: %#x...\n",
-		base_addr, reg, rc);
-
-	return rc;
-}
-
-int __read_gcc_register(struct iris_hfi_device *device, u32 reg)
+static int __read_gcc_register(struct iris_hfi_device *device, u32 reg)
 {
 	int rc = 0;
 	u8 *base_addr;
@@ -855,7 +860,7 @@ int __read_gcc_register(struct iris_hfi_device *device, u32 reg)
 	return rc;
 }
 
-int __read_register(struct iris_hfi_device *device, u32 reg)
+static int __read_register(struct iris_hfi_device *device, u32 reg)
 {
 	int rc = 0;
 	u8 *base_addr;
@@ -909,6 +914,152 @@ static void __set_threshold_registers(struct iris_hfi_device *device)
 	if (__tzbsp_set_cvp_state(TZ_SUBSYS_STATE_RESTORE_THRESHOLD))
 		dprintk(CVP_ERR, "Failed to restore threshold values\n");
 }
+
+#ifdef CONFIG_EVA_SUN
+static void __enter_cpu_noc_lpi(struct iris_hfi_device *device)
+{
+	u32 lpi_status, count = 0, max_count = 2000;
+
+	/* New addition to put CPU/Tensilica NOC to low power Section 6.14 (Steps 15-17)*/
+
+	/*
+	 * Clear CVP_iris_cpu_noc_errorLogger_ErrVld_Low SWI
+	 * by writing 0x1 to CVP_NOC_ERR_ERRCLR_LOW_OFFS
+	 */
+	__write_register(device, CVP_NOC_ERR_ERRCLR_LOW_OFFS, 0x1);
+	__write_register(device, CVP_WRAPPER_CPU_NOC_LPI_CONTROL, 0x1);
+	while (count < max_count) {
+		lpi_status = __read_register(device, CVP_WRAPPER_CPU_NOC_LPI_STATUS);
+		if (((lpi_status & BIT(1)) || (lpi_status & BIT(2))) && (!(lpi_status & BIT(0)))) {
+			/*
+			 * If QDENY == true, or
+			 * If QACTIVE == true && QACCEPT == false
+			 * Try again
+			 */
+			__write_register(device, CVP_WRAPPER_CPU_NOC_LPI_CONTROL, 0x0);
+			usleep_range(10, 20);
+			__write_register(device, CVP_NOC_ERR_ERRCLR_LOW_OFFS, 0x1);
+			__write_register(device, CVP_WRAPPER_CPU_NOC_LPI_CONTROL, 0x1);
+			usleep_range(1000, 1200);
+			count++;
+		} else {
+			break;
+		}
+	}
+
+	/* HPG Step-7 of section 3.7 */
+	__write_register(device, CVP_WRAPPER_CPU_NOC_LPI_CONTROL, 0x0);
+	if (count == max_count) {
+		u32 pc_ready, wfi_status;
+
+		wfi_status = __read_register(device, CVP_WRAPPER_CPU_STATUS);
+		pc_ready = __read_register(device, CVP_CTRL_STATUS);
+
+		dprintk(CVP_WARN,
+			"%s, CPU NOC not in qaccept status %x %x %x\n",
+			__func__, lpi_status, wfi_status, pc_ready);
+
+		/* Added for debug info purpose, not part of HPG */
+		call_iris_op(device, print_sbm_regs, device);
+	} else
+		dprintk(CVP_WARN,
+			"%s, CPU Noc is in LPI: lpi_status %x (count %d)\n",
+			__func__, lpi_status, count);
+}
+
+static void __enter_core_noc_lpi(struct iris_hfi_device *device)
+{
+	u32 lpi_status, count = 0, max_count = 2000, val = 0;
+
+	/* New addition to put CORE NOC to low power Section 6.14 (Steps 4-6)*/
+
+	/*
+	 * Clear CVP_NOC_ERL_ERRORLOGGER_MAIN_ERRORLOGGER_ERRVLD_LOW SWI
+	 * by writing 0x1 to CVP_NOC_CORE_ERR_ERRCLR_LOW_OFFS
+	 */
+	__write_register(device, CVP_NOC_CORE_ERR_ERRCLR_LOW_OFFS, 0x1);
+	__write_register(device, CVP_AON_WRAPPER_CVP_NOC_LPI_CONTROL, 0x1);
+	while (count < max_count) {
+		/* Reading the LPI status */
+		lpi_status = __read_register(device, CVP_AON_WRAPPER_CVP_NOC_LPI_STATUS);
+		if (((lpi_status & BIT(1)) || (lpi_status & BIT(2))) && (!(lpi_status & BIT(0)))) {
+			/*
+			 * If QDENY == true, or
+			 * If QACTIVE == true && QACCEPT == false
+			 * Try again
+			 */
+			__write_register(device, CVP_AON_WRAPPER_CVP_NOC_LPI_CONTROL, 0x0);
+			usleep_range(10, 20);
+			__write_register(device, CVP_NOC_CORE_ERR_ERRCLR_LOW_OFFS, 0x1);
+			val = __read_register(device, CVP_NOC_CORE_ERR_MAINCTL_LOW_OFFS);
+			__write_register(device, CVP_NOC_CORE_ERR_MAINCTL_LOW_OFFS,
+					val & ~(BIT(0)|BIT(1)));
+			__write_register(device, CVP_AON_WRAPPER_CVP_NOC_LPI_CONTROL, 0x1);
+			usleep_range(1000, 1200);
+			count++;
+		} else {
+			break;
+		}
+	}
+
+	/* HPG Step-4 of section 3.4.4 */
+	__write_register(device, CVP_AON_WRAPPER_CVP_NOC_LPI_CONTROL, 0x0);
+	if (count == max_count) {
+		dprintk(CVP_WARN,
+			"%s, CORE NOC not in qaccept status %x\n",
+			__func__, lpi_status);
+
+		/* Added for debug info purpose, not part of HPG */
+		call_iris_op(device, print_sbm_regs, device);
+	} else
+		dprintk(CVP_WARN,
+		"%s, CORE Noc is in LPI: lpi_status %x (count %d)\n",
+		__func__, lpi_status, count);
+}
+
+static void __enter_video_ctl_noc_lpi(struct iris_hfi_device *device)
+{
+	u32 lpi_status, count = 0, max_count = 2000;
+
+	/* New addition to put CVP_VIDEO_CTL NOC to low power Section 6.14 (Steps 19-21)*/
+
+	__write_register(device, CVP_AON_WRAPPER_CVP_VIDEO_CTL_NOC_LPI_CONTROL, 0x1);
+	while (count < max_count) {
+		/* Reading the LPI status */
+		lpi_status = __read_register(device, CVP_AON_WRAPPER_CVP_VIDEO_CTL_NOC_LPI_STATUS);
+		if (((lpi_status & BIT(1)) || (lpi_status & BIT(2))) && (!(lpi_status & BIT(0)))) {
+			/*
+			 * If QDENY == true, or
+			 * If QACTIVE == true && QACCEPT == false
+			 * Try again
+			 */
+			__write_register(device,
+				CVP_AON_WRAPPER_CVP_VIDEO_CTL_NOC_LPI_CONTROL, 0x0);
+			usleep_range(10, 20);
+			__write_register(device,
+				CVP_AON_WRAPPER_CVP_VIDEO_CTL_NOC_LPI_CONTROL, 0x1);
+			usleep_range(1000, 1200);
+			count++;
+		} else {
+			break;
+		}
+	}
+
+	/* HPG Step-22 of section 6.14 */
+	__write_register(device, CVP_AON_WRAPPER_CVP_VIDEO_CTL_NOC_LPI_CONTROL, 0x0);
+	if (count == max_count) {
+		dprintk(CVP_WARN,
+			"%s, CVP_VIDEO_CTL NOC not in qaccept status %x %x %x\n",
+			__func__, lpi_status);
+
+		/* Added for debug info purpose, not part of HPG */
+		call_iris_op(device, print_sbm_regs, device);
+	} else
+		dprintk(CVP_WARN,
+		"%s, CVP_VIDEO_CTL Noc is in LPI: lpi_status %x (count %d)\n",
+		__func__, lpi_status, count);
+}
+#endif
 
 static int __unvote_buses(struct iris_hfi_device *device)
 {
@@ -1075,6 +1226,29 @@ int __tzbsp_set_cvp_state(enum tzbsp_subsys_state state)
 	return 0;
 }
 
+/*
+ * Based on fal10_veto, X2RPMh, core_pwr_on and PWAitMode value, infer
+ * value of xtss_sw_reset. xtss_sw_reset is a TZ register bit. Driver
+ * cannot access it directly.
+ *
+ * In __boot_firmware() function, the caller of this function. It checks
+ * "core_pwr_on" == false, basically core powered off. So this function
+ * doesn't check core_pwr_on. Assume core_pwr_on = false.
+ *
+ * fal10_veto = VPU_CPU_CS_X2RPMh[2] |
+ *		( ~VPU_CPU_CS_X2RPMh[1] & core_pwr_on ) |
+ *		( ~VPU_CPU_CS_X2RPMh[0] & ~( xtss_sw_reset | PWaitMode ) ) ;
+ */
+static inline void check_tensilica_in_reset(struct iris_hfi_device *device)
+{
+	u32 xtss_reset_ro = 1;
+
+#ifdef CONFIG_EVA_SUN
+	xtss_reset_ro = __read_register(device, CVP_WRAPPER_XTSS_SW_RESET_RO);
+#endif
+	dprintk(CVP_WARN, "tensilica xtss_reset_ro %#x\n", xtss_reset_ro);
+}
+
 static const char boot_states[0x40][32] = {
 	"NOT INIT",
 	"RST_START",
@@ -1155,6 +1329,16 @@ static inline int __boot_firmware(struct iris_hfi_device *device)
 		dprintk(CVP_ERR, "Failed to enabled inter-frame PC\n");
 
 	ctrl_init_val = BIT(0);
+	/*
+	 * Add BIT(1) to disable DSP and BIT(3) to disable SYNX
+	 */
+#ifndef CVP_DSP_ENABLED
+	ctrl_init_val |= BIT(1);
+#endif
+#ifndef CVP_SYNX_ENABLED
+	ctrl_init_val |= BIT(3);
+#endif
+
 	/* RUMI: CVP_CTRL_INIT in MPTest has bit 0 and 3 set */
 	__write_register(device, CVP_CTRL_INIT, ctrl_init_val);
 	while (!(ctrl_status & CVP_CTRL_INIT_STATUS__M) && count < max_tries) {
@@ -1182,7 +1366,7 @@ static inline int __boot_firmware(struct iris_hfi_device *device)
 			"Failed to boot FW status: %x %x %s\n",
 			ctrl_status, ctrl_init_val,
 			boot_states[(ctrl_status >> 9) & 0x3f]);
-		call_iris_op(device, check_tensilica_in_reset, device);
+		check_tensilica_in_reset(device);
 		rc = -ENODEV;
 	}
 
@@ -1192,10 +1376,6 @@ static inline int __boot_firmware(struct iris_hfi_device *device)
 
 	CVPKERNEL_ATRACE_END("__boot_firmware");
 
-#ifdef USE_PRESIL
-	/*Disable HW Synx if RUMI Support for Synx unavailable*/
-	__write_register(device, CVP_CPU_CS_SCIACMD, 0x8);
-#endif
 	return rc;
 }
 
@@ -1203,7 +1383,6 @@ static int iris_hfi_resume(void *dev)
 {
 	int rc = 0;
 	struct iris_hfi_device *device = (struct iris_hfi_device *) dev;
-	CVPKERNEL_ATRACE_BEGIN("__iris_hfi_resume");
 
 	if (!device) {
 		dprintk(CVP_ERR, "%s invalid device\n", __func__);
@@ -1215,7 +1394,7 @@ static int iris_hfi_resume(void *dev)
 	mutex_lock(&device->lock);
 	rc = __resume(device);
 	mutex_unlock(&device->lock);
-	CVPKERNEL_ATRACE_END("__iris_hfi_resume");
+
 	return rc;
 }
 
@@ -1232,17 +1411,13 @@ static int iris_hfi_suspend(void *dev)
 	}
 
 	dprintk(CVP_CORE, "Suspending Iris\n");
-	if (mutex_trylock(&device->lock)) {
-		rc = __power_collapse(device, true);
-		if (rc) {
-			dprintk(CVP_WARN, "%s: Iris is busy\n", __func__);
-			rc = -EBUSY;
-		}
-		mutex_unlock(&device->lock);
-	} else {
-		dprintk(CVP_ERR, "%s: Failed to acquire lock\n", __func__);
-		return -EBUSY;
+	mutex_lock(&device->lock);
+	rc = __power_collapse(device, true);
+	if (rc) {
+		dprintk(CVP_WARN, "%s: Iris is busy\n", __func__);
+		rc = -EBUSY;
 	}
+	mutex_unlock(&device->lock);
 
 	/* Cancel pending delayed works if any */
 	if (!rc)
@@ -1284,6 +1459,7 @@ static void cvp_dump_csr(struct iris_hfi_device *dev)
 	dprintk(CVP_ERR, "CVP_WRAPPER_CORE_CLOCK_CONFIG: %x\n", reg);
 
 	call_iris_op(dev, dump_noc_regs, dev);
+
 	dev->reg_dumped = true;
 }
 
@@ -1316,8 +1492,6 @@ static int iris_hfi_scale_clocks(void *dev, u32 freq)
 	int rc = 0;
 	struct iris_hfi_device *device = dev;
 
-	CVPKERNEL_ATRACE_BEGIN("__iris_hfi_scale_clocks");
-
 	if (!device) {
 		dprintk(CVP_ERR, "Invalid args: %pK\n", device);
 		return -EINVAL;
@@ -1334,7 +1508,7 @@ static int iris_hfi_scale_clocks(void *dev, u32 freq)
 	rc = msm_cvp_set_clocks_impl(device, freq);
 exit:
 	mutex_unlock(&device->lock);
-	CVPKERNEL_ATRACE_END("__iris_hfi_scale_clocks");
+
 	return rc;
 }
 
@@ -1345,7 +1519,6 @@ static int __iface_cmdq_write_relaxed(struct iris_hfi_device *device,
 	struct cvp_iface_q_info *q_info;
 	struct cvp_hal_cmd_pkt_hdr *cmd_packet;
 	int result = -E2BIG;
-	CVPKERNEL_ATRACE_BEGIN("__iface_cmdq_write_relaxed");
 
 	if (!device || !pkt) {
 		dprintk(CVP_ERR, "Invalid Params\n");
@@ -1404,7 +1577,6 @@ static int __iface_cmdq_write_relaxed(struct iris_hfi_device *device,
 
 err_q_write:
 err_q_null:
-	CVPKERNEL_ATRACE_END("__iface_cmdq_write_relaxed");
 	return result;
 }
 
@@ -1412,13 +1584,7 @@ static int __iface_cmdq_write(struct iris_hfi_device *device, void *pkt)
 {
 	bool needs_interrupt = false;
 	struct cvp_hfi_cmd_session_hdr *cmd_hdr = NULL;
-	int rc = 0;
-	struct cvp_iface_q_info *q_info = NULL;
-	struct cvp_hfi_queue_header *queue = NULL;
-	struct msm_cvp_core *core = NULL;
-
-	core = cvp_driver->cvp_core;
-	rc = __iface_cmdq_write_relaxed(device, pkt, &needs_interrupt);
+	int rc = __iface_cmdq_write_relaxed(device, pkt, &needs_interrupt);
 
 #ifdef USE_PRESIL42
 	__write_register(device, CVP_CPU_CS_H2ASOFTINT, 1);
@@ -1431,43 +1597,8 @@ static int __iface_cmdq_write(struct iris_hfi_device *device, void *pkt)
 		if (call_iris_op(device, check_ctl_power_on, device))
 			dprintk(CVP_ERR, "%s power off, don't access reg\n", __func__);
 		__write_register(device, CVP_CPU_CS_H2ASOFTINT, 1);
-
-		q_info = &device->iface_queues[CVP_IFACEQ_CMDQ_IDX];
-		if (core && q_info) {
-			queue = (struct cvp_hfi_queue_header *) q_info->q_hdr;
-			if (queue) {
-				spin_lock(&q_info->hfi_lock);
-				core->cur_cmd_q_read_offset = queue->qhdr_read_idx;
-				if (core->prev_cmd_q_read_offset != core->cur_cmd_q_read_offset) {
-					core->last_fw_fetch_ts = ktime_get();
-					core->prev_cmd_q_read_offset = core->cur_cmd_q_read_offset;
-				}
-				spin_unlock(&q_info->hfi_lock);
-			}
-		}
-
 	}
 	cmd_hdr = (struct cvp_hfi_cmd_session_hdr *)pkt;
-	if ((msm_cvp_debug & CVP_PERF) == CVP_PERF) {
-		u32 pkt_id = 0;
-		u64 aontimer = 0;
-		const char *command_name = "";
-		u32 session_id = 0;
-		u32 stream_idx = 0;
-		u64 transaction_id = 0;
-
-		session_id = cmd_hdr->header.session_id;
-		stream_idx = cmd_hdr->header.stream_idx;
-		transaction_id = cmd_hdr->header.client_data.transaction_id;
-		pkt_id  = cmd_hdr->header.packet_type;
-		command_name = get_pkt_name_from_type(pkt_id);
-		aontimer = get_aon_time();
-		dprintk(CVP_PERF,
-			"%s: msg packet %s sent to FW at aontimer %llu session_id 0x%x stream_idx 0x%x transaction_id 0x%x\n",
-			__func__, command_name, aontimer, session_id,
-			stream_idx, transaction_id);
-	}
-
 	msm_cvp_cmd_tracing_from_sw(cmd_hdr, "EVA_KMD_FWD_END");
 	return rc;
 }
@@ -1601,6 +1732,7 @@ static void __interface_dsp_queues_release(struct iris_hfi_device *device)
 
 static int __interface_dsp_queues_init(struct iris_hfi_device *dev)
 {
+#ifdef CVP_DSP_ENABLED
 	int rc = 0;
 	u32 i;
 	struct cvp_iface_q_info *iface_q;
@@ -1612,8 +1744,6 @@ static int __interface_dsp_queues_init(struct iris_hfi_device *dev)
 	dma_addr_t dma_handle;
 	dma_addr_t iova;
 	struct context_bank_info *cb;
-	int count = 0;
-	const int max_retries = 10;
 
 	q_size = ALIGN(QUEUE_SIZE, SZ_1M);
 	mem_data = &dev->dsp_iface_q_table.mem_data;
@@ -1623,21 +1753,9 @@ static int __interface_dsp_queues_init(struct iris_hfi_device *dev)
 		cvp_dsp_init_hfi_queue_hdr(dev);
 		return 0;
 	}
-
-	while (count < max_retries) {
-		/* Allocate dsp queues from CDSP device memory */
-		kvaddr = dma_alloc_coherent(dev->res->mem_cdsp.dev, q_size,
+	/* Allocate dsp queues from CDSP device memory */
+	kvaddr = dma_alloc_coherent(dev->res->mem_cdsp.dev, q_size,
 				&dma_handle, GFP_KERNEL);
-		if (IS_ERR_OR_NULL(kvaddr)) {
-			dprintk(CVP_ERR, "%s: failed dma allocation, retry %d\n",
-					__func__, count);
-			usleep_range(100000, 105000);
-			count++;
-		} else {
-			dprintk(CVP_INFO, "%s: DMA Allocation success\n", __func__);
-			break;
-		}
-	}
 	if (IS_ERR_OR_NULL(kvaddr)) {
 		dprintk(CVP_ERR, "%s: failed dma allocation\n", __func__);
 		goto fail_dma_alloc;
@@ -1690,6 +1808,9 @@ fail_dma_map:
 	dma_free_coherent(dev->res->mem_cdsp.dev, q_size, kvaddr, dma_handle);
 fail_dma_alloc:
 	return -ENOMEM;
+#else
+	return 0; // DSP is not enabled
+#endif
 }
 
 static void __interface_queues_release(struct iris_hfi_device *device)
@@ -1701,9 +1822,6 @@ static void __interface_queues_release(struct iris_hfi_device *device)
 	int num_entries = device->res->qdss_addr_set.count;
 	unsigned long mem_map_table_base_addr;
 	struct context_bank_info *cb;
-#ifdef CVP_SW_DBG_BUF_ENABLED
-	struct msm_cvp_core *core = NULL;
-#endif
 
 	if (device->qdss.align_virtual_addr) {
 		qdss = (struct cvp_hfi_mem_map_table *)
@@ -1735,9 +1853,7 @@ static void __interface_queues_release(struct iris_hfi_device *device)
 
 	__smem_free(device, &device->iface_q_table.mem_data);
 	__smem_free(device, &device->sfr.mem_data);
-#ifdef CVP_SW_DBG_BUF_ENABLED
-	__smem_free(device, &device->sw_dbg_buf.mem_data);
-#endif
+
 	for (i = 0; i < CVP_IFACEQ_NUMQ; i++) {
 		device->iface_queues[i].q_hdr = NULL;
 		device->iface_queues[i].q_array.align_virtual_addr = NULL;
@@ -1752,15 +1868,7 @@ static void __interface_queues_release(struct iris_hfi_device *device)
 
 	device->sfr.align_virtual_addr = NULL;
 	device->sfr.align_device_addr = 0;
-#ifdef CVP_SW_DBG_BUF_ENABLED
-	device->sw_dbg_buf.align_virtual_addr = NULL;
-	device->sw_dbg_buf.align_device_addr = 0;
-	core = cvp_driver->cvp_core;
-	if (!core)
-		dprintk(CVP_ERR, "%s: Core is null\n", __func__);
-	else
-		mutex_destroy(&core->kmd_dbg.dbg_lock);
-#endif
+
 	device->mem_addr.align_virtual_addr = NULL;
 	device->mem_addr.align_device_addr = 0;
 #endif
@@ -1939,9 +2047,7 @@ static int __interface_queues_init(struct iris_hfi_device *dev)
 	size_t q_size;
 	unsigned long mem_map_table_base_addr;
 	struct context_bank_info *cb;
-#ifdef CVP_SW_DBG_BUF_ENABLED
-	struct msm_cvp_core *core = NULL;
-#endif
+
 	q_size = SHARED_QSIZE - ALIGNED_SFR_SIZE - ALIGNED_QDSS_SIZE;
 	mem_addr = &dev->mem_addr;
 	if (!is_iommu_present(dev->res))
@@ -1952,7 +2058,7 @@ static int __interface_queues_init(struct iris_hfi_device *dev)
 				0, q_size);
 		goto hfi_queue_init;
 	}
-	rc = __smem_alloc(dev, mem_addr, q_size, 1, SMEM_UNCACHED, 0);
+	rc = __smem_alloc(dev, mem_addr, q_size, 1, SMEM_UNCACHED);
 	if (rc) {
 		dprintk(CVP_ERR, "iface_q_table_alloc_fail\n");
 		goto fail_alloc_queue;
@@ -1972,7 +2078,7 @@ hfi_queue_init:
 				0, ALIGNED_SFR_SIZE);
 		goto sfr_init;
 	}
-	rc = __smem_alloc(dev, mem_addr, ALIGNED_SFR_SIZE, 1, SMEM_UNCACHED, O_RDWR | O_CLOEXEC);
+	rc = __smem_alloc(dev, mem_addr, ALIGNED_SFR_SIZE, 1, SMEM_UNCACHED);
 	if (rc) {
 		dprintk(CVP_WARN, "sfr_alloc_fail: SFR not will work\n");
 		dev->sfr.align_device_addr = 0;
@@ -1985,59 +2091,13 @@ hfi_queue_init:
 	}
 sfr_init:
 	__sfr_init(dev);
-#ifdef CVP_SW_DBG_BUF_ENABLED
-	core = cvp_driver->cvp_core;
-	if (dev->sw_dbg_buf.align_virtual_addr) {
-		memset((void *)dev->sw_dbg_buf.align_virtual_addr,
-				0, ALIGNED_SW_DBG_BUF_SIZE);
-		if (core) {
-			core->kmd_dbg.kmd_sess_cnt = 0;
-			core->kmd_dbg.kmd_queue_dump_cnt = 0;
-			memset(&(core->kmd_trace.kmd_buf), 0,
-				(sizeof(struct eva_kmd_buf) * DBG_BUF_CNT));
-			memset(&(core->kmd_trace.kmd_session), 0,
-				(sizeof(struct eva_kmd_session) * TRACE_SESS_SIZE));
-			memset(core->kmd_trace.kmd_debug_log.log, 0,
-				sizeof(struct cvp_debug_log));
-			memset(&(core->kmd_trace.kmd_debug_log.smmu_debug), 0,
-				sizeof(struct eva_smmu_debug));
-		}
-	} else {
-		rc = __smem_alloc(dev, mem_addr, ALIGNED_SW_DBG_BUF_SIZE, 1,
-				SMEM_UNCACHED, O_RDWR | O_CLOEXEC);
-		if (rc) {
-			dprintk(CVP_WARN, "sfr_alloc_fail: sw_dbg_buf not will work\n");
-			dev->sw_dbg_buf.align_device_addr = 0;
-		} else {
-			dev->sw_dbg_buf.align_device_addr = mem_addr->align_device_addr;
-			dev->sw_dbg_buf.align_virtual_addr = mem_addr->align_virtual_addr;
-			dev->sw_dbg_buf.mem_size = ALIGNED_SW_DBG_BUF_SIZE;
-			dev->sw_dbg_buf.mem_data = mem_addr->mem_data;
-			if (core) {
-				mutex_init(&core->kmd_dbg.dbg_lock);
-				core->kmd_dbg.kmd_buf_offset = 0;
-				core->kmd_dbg.kmd_buf_cnt = 0;
-				core->kmd_dbg.kmd_sess_cnt = 0;
-				core->kmd_dbg.kmd_queue_dump_cnt = 0;
-				memset(&(core->kmd_trace.kmd_buf), 0,
-					(sizeof(struct eva_kmd_buf) * DBG_BUF_CNT));
-				memset(&(core->kmd_trace.kmd_session), 0,
-					(sizeof(struct eva_kmd_session) * TRACE_SESS_SIZE));
-				memset(core->kmd_trace.kmd_debug_log.log, 0,
-					sizeof(struct cvp_debug_log));
-				memset(&(core->kmd_trace.kmd_debug_log.smmu_debug), 0,
-					sizeof(struct eva_smmu_debug));
-			}
-		}
-	}
-#endif
 
 	if (dev->qdss.align_virtual_addr)
 		goto dsp_hfi_queue_init;
 
 	if ((msm_cvp_fw_debug_mode & HFI_DEBUG_MODE_QDSS) && num_entries) {
 		rc = __smem_alloc(dev, mem_addr, ALIGNED_QDSS_SIZE, 1,
-				SMEM_UNCACHED, 0);
+				SMEM_UNCACHED);
 		if (rc) {
 			dprintk(CVP_WARN,
 				"qdss_alloc_fail: QDSS messages logging will not work\n");
@@ -2165,23 +2225,13 @@ static int __sys_set_power_control(struct iris_hfi_device *device,
 	bool enable)
 {
 	struct regulator_info *rinfo;
-	struct power_domain_info *pd_info;
 	bool supported = false;
 	struct cvp_hfi_cmd_sys_set_property_packet *pkt;
 
-	if (device->res->gdsc_framework_type) {
-		iris_hfi_for_each_pwr_domain(device, pd_info) {
-			if (pd_info->has_hw_power_collapse) {
-				supported = true;
-				break;
-			}
-		}
-	} else {
-		iris_hfi_for_each_regulator(device, rinfo) {
-			if (rinfo->has_hw_power_collapse) {
-				supported = true;
-				break;
-			}
+	iris_hfi_for_each_regulator(device, rinfo) {
+		if (rinfo->has_hw_power_collapse) {
+			supported = true;
+			break;
 		}
 	}
 
@@ -2202,18 +2252,23 @@ static int __sys_set_power_control(struct iris_hfi_device *device,
 
 static void cvp_pm_qos_update(struct iris_hfi_device *device, bool vote_on)
 {
-	u32 latency;
+	u32 latency, off_vote_cnt;
 	int i, err = 0;
 
-	latency = vote_on ? device->global_pm_qos_latency_us :
+	spin_lock(&device->res->pm_qos.lock);
+	off_vote_cnt = device->res->pm_qos.off_vote_cnt;
+	spin_unlock(&device->res->pm_qos.lock);
+
+	if (vote_on && off_vote_cnt)
+		return;
+
+	latency = vote_on ? device->res->pm_qos.latency_us :
 			PM_QOS_RESUME_LATENCY_DEFAULT_VALUE;
 
-	if (device->global_pm_qos_latency_us && device->res->pm_qos.pm_qos_hdls)
+	if (device->res->pm_qos.latency_us && device->res->pm_qos.pm_qos_hdls)
 		for (i = 0; i < device->res->pm_qos.silver_count; i++) {
 			if (!cpu_possible(device->res->pm_qos.silver_cores[i]))
 				continue;
-			dprintk(CVP_PWR, "%s, core %d, updating latency %d\n",
-				__func__, i, latency);
 			err = dev_pm_qos_update_request(
 				&device->res->pm_qos.pm_qos_hdls[i],
 				latency);
@@ -2228,14 +2283,9 @@ static void cvp_pm_qos_update(struct iris_hfi_device *device, bool vote_on)
 			}
 		}
 }
-
-static int iris_pm_qos_aggregate(void *device)
+static int iris_pm_qos_update(void *device)
 {
-	struct iris_hfi_device *dev = NULL;
-	struct msm_cvp_core *core = NULL;
-	struct msm_cvp_inst *inst = NULL;
-	struct cvp_session_queue *sq = NULL;
-	u32 min_pm_qos_latency = PM_QOS_RESUME_LATENCY_DEFAULT_VALUE;
+	struct iris_hfi_device *dev;
 
 	if (!device) {
 		dprintk(CVP_ERR, "%s Invalid device\n", __func__);
@@ -2243,33 +2293,10 @@ static int iris_pm_qos_aggregate(void *device)
 	}
 
 	dev = device;
-	core = cvp_driver->cvp_core;
-	mutex_lock(&core->lock);
-	list_for_each_entry(inst, &core->instances, list) {
-		sq = &inst->session_queue;
-		spin_lock(&sq->lock);
-		/* Consider the latency for aggregation only if session is in start state */
-		if (sq->state == QUEUE_START)
-			min_pm_qos_latency = min_pm_qos_latency < inst->pm_qos_latency ?
-							min_pm_qos_latency:inst->pm_qos_latency;
-		spin_unlock(&sq->lock);
-	}
-	mutex_unlock(&core->lock);
 
-	if (min_pm_qos_latency != dev->global_pm_qos_latency_us) {
-		mutex_lock(&dev->lock);
-		dprintk(CVP_PWR, "%s New aggregated minmum latency %d\n",
-				__func__, min_pm_qos_latency);
-		/* Put a threshold on user latency so that user can only use the latency
-		 * to acheive power saving. Malicius user must not be allowed to keep the
-		 * apps core away from LPM.
-		 */
-		if (min_pm_qos_latency > core->resources.pm_qos.latency_us) {
-			dev->global_pm_qos_latency_us = min_pm_qos_latency;
-			cvp_pm_qos_update(dev, true);
-		}
-		mutex_unlock(&dev->lock);
-	}
+	mutex_lock(&dev->lock);
+	cvp_pm_qos_update(dev, true);
+	mutex_unlock(&dev->lock);
 
 	return 0;
 }
@@ -2387,7 +2414,6 @@ static int iris_hfi_core_init(void *device)
 	struct cvp_hfi_cmd_sys_init_packet pkt;
 	struct cvp_hfi_cmd_sys_get_property_packet *pversion_pkt;
 	struct iris_hfi_device *dev;
-	CVPKERNEL_ATRACE_BEGIN("iris_hfi_core_init");
 
 	if (!device) {
 		dprintk(CVP_ERR, "Invalid device\n");
@@ -2504,7 +2530,7 @@ static int iris_hfi_core_init(void *device)
 	__set_ubwc_config(device);
 	__sys_set_idle_indicator(device, true);
 
-	if (dev->global_pm_qos_latency_us) {
+	if (dev->res->pm_qos.latency_us) {
 		int err = 0;
 		u32 i, cpu;
 
@@ -2522,13 +2548,11 @@ static int iris_hfi_core_init(void *device)
 			cpu = dev->res->pm_qos.silver_cores[i];
 			if (!cpu_possible(cpu))
 				continue;
-			dprintk(CVP_PWR, "%s, core %d, adding latency %d\n",
-				__func__, i, dev->global_pm_qos_latency_us);
 			err = dev_pm_qos_add_request(
 				get_cpu_device(cpu),
 				&dev->res->pm_qos.pm_qos_hdls[i],
 				DEV_PM_QOS_RESUME_LATENCY,
-				dev->global_pm_qos_latency_us);
+				dev->res->pm_qos.latency_us);
 			if (err < 0)
 				dprintk(CVP_WARN,
 					"%s pm_qos_add_req %d failed\n",
@@ -2543,9 +2567,8 @@ pm_qos_bail:
 
 	pm_relax(dev->res->pdev->dev.parent);
 	dprintk(CVP_CORE, "Core inited successfully\n");
-	CVPKERNEL_ATRACE_END("iris_hfi_core_init");
-	return 0;
 
+	return 0;
 err_init_queues:
 	__interface_queues_release(dev);
 	power_off_iris2(dev);
@@ -2563,7 +2586,6 @@ err_no_mem:
 	dprintk(CVP_ERR, "Core init failed\n");
 	mutex_unlock(&dev->lock);
 	pm_relax(dev->res->pdev->dev.parent);
-	CVPKERNEL_ATRACE_END("iris_hfi_core_init");
 	return rc;
 }
 
@@ -2582,7 +2604,7 @@ static int iris_hfi_core_release(void *dev)
 
 	mutex_lock(&device->lock);
 	dprintk(CVP_WARN, "Core releasing\n");
-	if (device->global_pm_qos_latency_us &&
+	if (device->res->pm_qos.latency_us &&
 		device->res->pm_qos.pm_qos_hdls) {
 		for (i = 0; i < device->res->pm_qos.silver_count; i++) {
 			if (!cpu_possible(device->res->pm_qos.silver_cores[i]))
@@ -2705,27 +2727,13 @@ static void __session_clean(struct cvp_hal_session *session)
 {
 	struct cvp_hal_session *temp, *next;
 	struct iris_hfi_device *device;
-	struct msm_cvp_core *core = NULL;
-	struct msm_cvp_inst *inst = NULL;
-	void *tmp = NULL;
 
-	if (!session) {
+	if (!session || !session->device) {
 		dprintk(CVP_WARN, "%s: invalid params\n", __func__);
 		return;
 	}
-	core = cvp_driver->cvp_core;
-	if (!core || !core->dev_ops) {
-		dprintk(CVP_WARN, "%s: invalid core\n", __func__);
-		return;
-	}
-	device = (struct iris_hfi_device *)core->dev_ops->hfi_device_data;
-	if (!device) {
-		dprintk(CVP_ERR, "%s: invalid device\n", __func__);
-		return;
-	}
-	inst = (struct msm_cvp_inst *) session->session_id;
-	dprintk(CVP_SESS, "deleted the session: %pK, inst %pK, sess_id 0x%x\n",
-			session, inst, inst->sess_id);
+	device = session->device;
+	dprintk(CVP_SESS, "deleted the session: %pK\n", session);
 	/*
 	 * session might have been removed from the device list in
 	 * core_release, so check and remove if it is in the list
@@ -2736,13 +2744,6 @@ static void __session_clean(struct cvp_hal_session *session)
 			break;
 		}
 	}
-	/* Remove the IDR id assigned to this session */
-	mutex_lock(&core->idr_lock);
-	tmp = idr_remove(&core->sess_idr, inst->sess_id);
-	if (tmp != session)
-		dprintk(CVP_WARN, "%s: session\n", __func__);
-	mutex_unlock(&core->idr_lock);
-
 	/* Poison the session handle with zeros */
 	*session = (struct cvp_hal_session){ {0} };
 	kfree(session);
@@ -2752,25 +2753,19 @@ static int iris_hfi_session_clean(void *session)
 {
 	struct cvp_hal_session *sess_close;
 	struct iris_hfi_device *device;
-	struct msm_cvp_core *core;
 
 	if (!session) {
 		dprintk(CVP_ERR, "Invalid Params %s\n", __func__);
 		return -EINVAL;
 	}
 
-	core = cvp_driver->cvp_core;
-	if (!core || !core->dev_ops) {
-		dprintk(CVP_ERR, "Invalid core handle %s\n", __func__);
-		return -EINVAL;
-	}
-	device = (struct iris_hfi_device *)core->dev_ops->hfi_device_data;
+	sess_close = session;
+	device = sess_close->device;
+
 	if (!device) {
 		dprintk(CVP_ERR, "Invalid device handle %s\n", __func__);
 		return -EINVAL;
 	}
-
-	sess_close = session;
 
 	mutex_lock(&device->lock);
 
@@ -2789,7 +2784,8 @@ static int iris_debug_hook(void *device)
 		dprintk(CVP_ERR, "%s Invalid device\n", __func__);
 		return -ENODEV;
 	}
-	// dprintk(CVP_WARN, "Stop NOC transactions from EVA Core\n");
+
+	dprintk(CVP_WARN, "Stop NOC transactions from EVA Core\n");
 	val = __read_register(dev, CVP_VIDEO_B_NOC_A_QOSGEN_MAINCTL_LOW);
 	__write_register(dev, CVP_VIDEO_B_NOC_A_QOSGEN_MAINCTL_LOW, val | BIT(2));
 	val = __read_register(dev, CVP_VIDEO_B_NOC_B_QOSGEN_MAINCTL_LOW);
@@ -2805,6 +2801,7 @@ static int iris_debug_hook(void *device)
 	mask_val |= (CVP_FATAL_INTR_BMSK);
 	dprintk(CVP_WARN, "Masking Core and CPU NOC interrupts\n");
 	__write_register(dev, CVP_WRAPPER_INTR_MASK, mask_val);
+
 	return 0;
 }
 
@@ -2814,10 +2811,6 @@ static int iris_hfi_session_init(void *device, void *session_id,
 	struct cvp_hfi_cmd_sys_session_init_packet pkt;
 	struct iris_hfi_device *dev;
 	struct cvp_hal_session *s;
-	struct msm_cvp_core *core;
-	struct msm_cvp_inst *inst;
-	int id = 0;
-	CVPKERNEL_ATRACE_BEGIN("iris_hfi_session_session_init");
 
 	if (!device || !new_session) {
 		dprintk(CVP_ERR, "%s - invalid input\n", __func__);
@@ -2825,8 +2818,6 @@ static int iris_hfi_session_init(void *device, void *session_id,
 	}
 
 	dev = device;
-	core = cvp_driver->cvp_core;
-	inst = session_id;
 	mutex_lock(&dev->lock);
 
 	s = kzalloc(sizeof(*s), GFP_KERNEL);
@@ -2837,34 +2828,15 @@ static int iris_hfi_session_init(void *device, void *session_id,
 
 	s->session_id = session_id;
 	s->device = dev;
-
-	mutex_lock(&core->idr_lock);
-	idr_preload(GFP_KERNEL);
-	/* Need to think if we can use core->lock or dev->lock or need a
-	 * different new lock for this?
-	 */
-	id = idr_alloc_cyclic(&core->sess_idr, (void *)s, 0x7FFF0000, INT_MAX, GFP_NOWAIT);
-	idr_preload_end();
-	mutex_unlock(&core->idr_lock);
-	if (id < 0) {
-		dprintk(CVP_ERR,
-			"%s: idr allocation failed for session %pK of inst %pK\n",
-			__func__, s, session_id);
-		goto err_session_init_fail;
-	}
-
 	dprintk(CVP_SESS,
-		"%s: inst %pK, session %pK, idr_id = 0x%x\n", __func__, session_id, s, id);
+		"%s: inst %pK, session %pK\n", __func__, session_id, s);
 
 	list_add_tail(&s->list, &dev->sess_head);
 
 	__set_default_sys_properties(device);
 
-	inst->sess_id = id;
-
 	if (call_hfi_pkt_op(dev, session_init, &pkt, s)) {
 		dprintk(CVP_ERR, "session_init: failed to create packet\n");
-		inst->sess_id = 0x0000DEAD;
 		goto err_session_init_fail;
 	}
 
@@ -2873,16 +2845,13 @@ static int iris_hfi_session_init(void *device, void *session_id,
 		goto err_session_init_fail;
 
 	mutex_unlock(&dev->lock);
-	CVPKERNEL_ATRACE_END("iris_hfi_session_session_init");
 	return 0;
 
 err_session_init_fail:
 	if (s)
 		__session_clean(s);
-	inst->sess_id = 0;
 	*new_session = NULL;
 	mutex_unlock(&dev->lock);
-	CVPKERNEL_ATRACE_END("iris_hfi_session_session_init");
 	return -EINVAL;
 }
 
@@ -2890,19 +2859,7 @@ static int __send_session_cmd(struct cvp_hal_session *session, int pkt_type)
 {
 	struct cvp_hal_session_cmd_pkt pkt;
 	int rc = 0;
-	struct msm_cvp_core *core;
-	struct iris_hfi_device *device;
-
-	core = cvp_driver->cvp_core;
-	if (!core || !core->dev_ops) {
-		dprintk(CVP_ERR, "%s: invalid core\n", __func__);
-		return -EINVAL;
-	}
-	device = (struct iris_hfi_device *)core->dev_ops->hfi_device_data;
-	if (!device) {
-		dprintk(CVP_ERR, "%s: invalid device\n", __func__);
-		return -EINVAL;
-	}
+	struct iris_hfi_device *device = session->device;
 
 	if (!__is_session_valid(device, session, __func__))
 		return -ECONNRESET;
@@ -2917,7 +2874,7 @@ static int __send_session_cmd(struct cvp_hal_session *session, int pkt_type)
 		goto err_create_pkt;
 	}
 
-	if (__iface_cmdq_write(device, &pkt))
+	if (__iface_cmdq_write(session->device, &pkt))
 		rc = -ENOTEMPTY;
 
 err_create_pkt:
@@ -2930,23 +2887,7 @@ static int __send_session_cmd_ktid(struct cvp_hal_session *session,
 {
 	struct cvp_hfi_cmd_session_hdr pkt;
 	int rc = 0;
-	struct msm_cvp_core *core;
-	struct iris_hfi_device *device;
-
-	if (!session) {
-		dprintk(CVP_ERR, "Invalid Params %s\n", __func__);
-		return -EINVAL;
-	}
-	core = cvp_driver->cvp_core;
-	if (!core || !core->dev_ops) {
-		dprintk(CVP_ERR, "%s: invalid core\n", __func__);
-		return -EINVAL;
-	}
-	device = (struct iris_hfi_device *)core->dev_ops->hfi_device_data;
-	if (!device) {
-		dprintk(CVP_ERR, "%s: invalid device\n", __func__);
-		return -EINVAL;
-	}
+	struct iris_hfi_device *device = session->device;
 
 	if (!__is_session_valid(device, session, __func__))
 		return -ECONNRESET;
@@ -2961,7 +2902,7 @@ static int __send_session_cmd_ktid(struct cvp_hal_session *session,
 		goto err_create_pkt;
 	}
 
-	if (__iface_cmdq_write(device, &pkt))
+	if (__iface_cmdq_write(session->device, &pkt))
 		rc = -ENOTEMPTY;
 
 err_create_pkt:
@@ -2973,7 +2914,6 @@ static int iris_hfi_session_end(void *session)
 {
 	struct cvp_hal_session *sess;
 	struct iris_hfi_device *device;
-	struct msm_cvp_core *core;
 	int rc = 0;
 
 	if (!session) {
@@ -2981,23 +2921,17 @@ static int iris_hfi_session_end(void *session)
 		return -EINVAL;
 	}
 
-	core = cvp_driver->cvp_core;
-	if (!core || !core->dev_ops) {
-		dprintk(CVP_ERR, "%s: invalid core\n", __func__);
-		return -EINVAL;
-	}
-	device = (struct iris_hfi_device *)core->dev_ops->hfi_device_data;
-	if (!device) {
-		dprintk(CVP_ERR, "Invalid device handle %s\n", __func__);
-		return -EINVAL;
-	}
-
 	sess = session;
+	device = sess->device;
+	if (!device) {
+		dprintk(CVP_ERR, "Invalid session %s\n", __func__);
+		return -EINVAL;
+	}
 
 	mutex_lock(&device->lock);
 
 	if (msm_cvp_fw_coverage) {
-		if (__sys_set_coverage(device, msm_cvp_fw_coverage))
+		if (__sys_set_coverage(sess->device, msm_cvp_fw_coverage))
 			dprintk(CVP_WARN, "Fw_coverage msg ON failed\n");
 	}
 
@@ -3012,24 +2946,14 @@ static int iris_hfi_session_abort(void *sess)
 {
 	struct cvp_hal_session *session = sess;
 	struct iris_hfi_device *device;
-	struct msm_cvp_core *core;
 	int rc = 0;
 
-	if (!session) {
+	if (!session || !session->device) {
 		dprintk(CVP_ERR, "Invalid Params %s\n", __func__);
 		return -EINVAL;
 	}
 
-	core = cvp_driver->cvp_core;
-	if (!core || !core->dev_ops) {
-		dprintk(CVP_ERR, "%s: invalid core\n", __func__);
-		return -EINVAL;
-	}
-	device = (struct iris_hfi_device *)core->dev_ops->hfi_device_data;
-	if (!device) {
-		dprintk(CVP_ERR, "%s: invalid device\n", __func__);
-		return -EINVAL;
-	}
+	device = session->device;
 
 	mutex_lock(&device->lock);
 
@@ -3038,41 +2962,6 @@ static int iris_hfi_session_abort(void *sess)
 	mutex_unlock(&device->lock);
 
 	return rc;
-}
-
-static int cvp_add_hfi_crc(struct eva_kmd_hfi_packet *in_pkt)
-{
-	unsigned long crc_value = 0;
-	unsigned int *pbuf      = NULL;
-	unsigned int idx        = 0;
-
-	if (!in_pkt) {
-		dprintk(CVP_ERR, "%s: invalid in_pkt\n", __func__);
-		return -1;
-	}
-#ifdef CONFIG_SUN_HFI
-	if (msm_cvp_fw_debug & HFI_DEBUG_MSG_CRC_EN) {
-#else
-	if (msm_cvp_fw_debug & HFI_DEBUG_CFG_BUF_CRC_EN) {
-#endif
-		struct cvp_hfi_cmd_session_hdr *cmd_hdr = (struct cvp_hfi_cmd_session_hdr *)in_pkt;
-
-		pbuf                                    = (unsigned int *)in_pkt;
-
-		for (idx = 0; idx < (cmd_hdr->header.size / sizeof(unsigned int)); idx++) {
-			// 0xC is the offset for reserved2 which use to store packet crc
-			if (idx == HFI_CMD_CLIENT_DATA_RESERVE_2_OFFSET_IN_UWORD32)
-				continue;
-			crc_value += *(pbuf + idx);
-		}
-
-		cmd_hdr->header.client_data.reserved2 = (unsigned int)(crc_value & 0xFFFFFFFF);
-
-		dprintk(CVP_MEM, "%s - hfi crc 0x%x", __func__,
-			cmd_hdr->header.client_data.reserved2);
-	}
-
-	return 0;
 }
 
 static int iris_hfi_session_set_buffers(void *sess, u32 iova, u32 size)
@@ -3084,23 +2973,13 @@ static int iris_hfi_session_set_buffers(void *sess, u32 iova, u32 size)
 	u64 ktid;
 	struct msm_cvp_core *core;
 	struct msm_cvp_inst *inst = NULL;
-	u32 session_id = 0;
 
-	if (!session || !iova || !size) {
+	if (!session || !session->device || !iova || !size) {
 		dprintk(CVP_ERR, "Invalid Params\n");
 		return -EINVAL;
 	}
 
-	core = cvp_driver->cvp_core;
-	if (!core || !core->dev_ops) {
-		dprintk(CVP_ERR, "%s: invalid core\n", __func__);
-		return -EINVAL;
-	}
-	device = (struct iris_hfi_device *)core->dev_ops->hfi_device_data;
-	if (!device) {
-		dprintk(CVP_ERR, "%s: invalid device\n", __func__);
-		return -EINVAL;
-	}
+	device = session->device;
 	mutex_lock(&device->lock);
 
 	if (!__is_session_valid(device, session, __func__)) {
@@ -3108,8 +2987,8 @@ static int iris_hfi_session_set_buffers(void *sess, u32 iova, u32 size)
 		goto err_create_pkt;
 	}
 
-	session_id = ((struct msm_cvp_inst *)(session->session_id))->sess_id;
-	inst = cvp_get_inst_from_id(core, session_id);
+	core = cvp_driver->cvp_core;
+	inst = cvp_get_inst_from_id(core, hash32_ptr(session));
 	if (!inst) {
 		dprintk(CVP_ERR, "%s: invalid session\n", __func__);
 		rc = -EINVAL;
@@ -3127,7 +3006,7 @@ static int iris_hfi_session_set_buffers(void *sess, u32 iova, u32 size)
 		goto err_set_buf;
 	}
 
-	if (__iface_cmdq_write(device, &pkt))
+	if (__iface_cmdq_write(session->device, &pkt))
 		rc = -ENOTEMPTY;
 
 err_set_buf:
@@ -3146,23 +3025,13 @@ static int iris_hfi_session_release_buffers(void *sess)
 	u64 ktid;
 	struct msm_cvp_core *core;
 	struct msm_cvp_inst *inst = NULL;
-	u32 session_id = 0;
 
-	if (!session) {
+	if (!session || !session->device) {
 		dprintk(CVP_ERR, "Invalid Params\n");
 		return -EINVAL;
 	}
 
-	core = cvp_driver->cvp_core;
-	if (!core || !core->dev_ops) {
-		dprintk(CVP_ERR, "%s: invalid core\n", __func__);
-		return -EINVAL;
-	}
-	device = (struct iris_hfi_device *)core->dev_ops->hfi_device_data;
-	if (!device) {
-		dprintk(CVP_ERR, "%s: invalid device\n", __func__);
-		return -EINVAL;
-	}
+	device = session->device;
 	mutex_lock(&device->lock);
 
 	if (!__is_session_valid(device, session, __func__)) {
@@ -3170,8 +3039,8 @@ static int iris_hfi_session_release_buffers(void *sess)
 		goto err_create_pkt;
 	}
 
-	session_id = ((struct msm_cvp_inst *)(session->session_id))->sess_id;
-	inst = cvp_get_inst_from_id(core, session_id);
+	core = cvp_driver->cvp_core;
+	inst = cvp_get_inst_from_id(core, hash32_ptr(session));
 	if (!inst) {
 		dprintk(CVP_ERR, "%s: invalid session\n", __func__);
 		rc = -EINVAL;
@@ -3188,7 +3057,7 @@ static int iris_hfi_session_release_buffers(void *sess)
 		goto err_release_buf;
 	}
 
-	if (__iface_cmdq_write(device, &pkt))
+	if (__iface_cmdq_write(session->device, &pkt))
 		rc = -ENOTEMPTY;
 
 err_release_buf:
@@ -3202,51 +3071,37 @@ static int iris_hfi_session_send(void *sess,
 		struct eva_kmd_hfi_packet *in_pkt)
 {
 	int rc = 0;
+	struct eva_kmd_hfi_packet pkt;
 	struct cvp_hal_session *session = sess;
 	struct iris_hfi_device *device;
-	struct msm_cvp_core *core;
 
-	if (!session) {
+	if (!session || !session->device) {
 		dprintk(CVP_ERR, "invalid session");
 		return -ENODEV;
 	}
 
-	core = cvp_driver->cvp_core;
-	if (!core || !core->dev_ops) {
-		dprintk(CVP_ERR, "%s: invalid core\n", __func__);
-		return -EINVAL;
-	}
-	device = (struct iris_hfi_device *)core->dev_ops->hfi_device_data;
-	if (!device) {
-		dprintk(CVP_ERR, "%s: invalid device\n", __func__);
-		return -EINVAL;
-	}
-
+	device = session->device;
 	mutex_lock(&device->lock);
 
 	if (!__is_session_valid(device, session, __func__)) {
 		rc = -ECONNRESET;
 		goto err_send_pkt;
 	}
-
-	rc = cvp_add_hfi_crc(in_pkt);
-	if (rc)
-		dprintk(CVP_ERR, "%s: Failed to cvp_add_hfi_crc\n",
-			__func__);
-
 	rc = call_hfi_pkt_op(device, session_send,
-			session, in_pkt);
+			&pkt, session, in_pkt);
 	if (rc) {
 		dprintk(CVP_ERR,
 				"failed to create pkt\n");
 		goto err_send_pkt;
 	}
 
-	if (__iface_cmdq_write(device, in_pkt))
+	if (__iface_cmdq_write(session->device, &pkt))
 		rc = -ENOTEMPTY;
 
 err_send_pkt:
 	mutex_unlock(&device->lock);
+	return rc;
+
 	return rc;
 }
 
@@ -3254,24 +3109,14 @@ static int iris_hfi_session_flush(void *sess, u64 ktid)
 {
 	struct cvp_hal_session *session = sess;
 	struct iris_hfi_device *device;
-	struct msm_cvp_core *core;
 	int rc = 0;
 
-	if (!session) {
+	if (!session || !session->device) {
 		dprintk(CVP_ERR, "Invalid Params %s\n", __func__);
 		return -EINVAL;
 	}
 
-	core = cvp_driver->cvp_core;
-	if (!core || !core->dev_ops) {
-		dprintk(CVP_ERR, "%s: invalid core\n", __func__);
-		return -EINVAL;
-	}
-	device = (struct iris_hfi_device *)core->dev_ops->hfi_device_data;
-	if (!device) {
-		dprintk(CVP_ERR, "%s: invalid device\n", __func__);
-		return -EINVAL;
-	}
+	device = session->device;
 
 	mutex_lock(&device->lock);
 
@@ -3286,24 +3131,14 @@ static int iris_hfi_session_start(void *sess, u64 ktid)
 {
 	struct cvp_hal_session *session = sess;
 	struct iris_hfi_device *device;
-	struct msm_cvp_core *core;
 	int rc = 0;
 
-	if (!session) {
+	if (!session || !session->device) {
 		dprintk(CVP_ERR, "Invalid Params %s\n", __func__);
 		return -EINVAL;
 	}
 
-	core = cvp_driver->cvp_core;
-	if (!core || !core->dev_ops) {
-		dprintk(CVP_ERR, "%s: invalid core\n", __func__);
-		return -EINVAL;
-	}
-	device = (struct iris_hfi_device *)core->dev_ops->hfi_device_data;
-	if (!device) {
-		dprintk(CVP_ERR, "%s: invalid device\n", __func__);
-		return -EINVAL;
-	}
+	device = session->device;
 
 	mutex_lock(&device->lock);
 
@@ -3318,24 +3153,14 @@ static int iris_hfi_session_stop(void *sess, u64 ktid)
 {
 	struct cvp_hal_session *session = sess;
 	struct iris_hfi_device *device;
-	struct msm_cvp_core *core;
 	int rc = 0;
 
-	if (!session) {
+	if (!session || !session->device) {
 		dprintk(CVP_ERR, "Invalid Params %s\n", __func__);
 		return -EINVAL;
 	}
 
-	core = cvp_driver->cvp_core;
-	if (!core || !core->dev_ops) {
-		dprintk(CVP_ERR, "%s: invalid core\n", __func__);
-		return -EINVAL;
-	}
-	device = (struct iris_hfi_device *)core->dev_ops->hfi_device_data;
-	if (!device) {
-		dprintk(CVP_ERR, "%s: invalid device\n", __func__);
-		return -EINVAL;
-	}
+	device = session->device;
 
 	mutex_lock(&device->lock);
 
@@ -3543,37 +3368,21 @@ skip_power_off:
 static void __process_sys_error(struct iris_hfi_device *device)
 {
 	struct cvp_hfi_sfr_struct *vsfr = NULL;
-	u32 sfr_buf_size = 0;
 
 	vsfr = (struct cvp_hfi_sfr_struct *)device->sfr.align_virtual_addr;
-
-	if (!vsfr) {
-		dprintk(CVP_ERR, "Failed to print SFR Message\n");
-		return;
-	}
-
-	sfr_buf_size = vsfr->bufSize;
-	if (vsfr && sfr_buf_size <= ALIGNED_SFR_SIZE) {
-		void *p = memchr(vsfr->rg_data, '\0', sfr_buf_size);
+	if (vsfr) {
+		void *p = memchr(vsfr->rg_data, '\0', vsfr->bufSize);
 		/*
 		 * SFR isn't guaranteed to be NULL terminated
 		 * since SYS_ERROR indicates that Iris is in the
 		 * process of crashing.
 		 */
 		if (p == NULL)
-			vsfr->rg_data[sfr_buf_size - 1] = '\0';
+			vsfr->rg_data[vsfr->bufSize - 1] = '\0';
 
-#ifdef USE_PRESIL42
-		presil42_retrieve_sfr_buffer(device);
-#endif
 		dprintk(CVP_ERR, "SFR Message from FW: %s\n",
 				vsfr->rg_data);
 	}
-}
-
-void __print_sfr_msg(struct iris_hfi_device *device)
-{
-	__process_sys_error(device);
 }
 
 static void __flush_debug_queue(struct iris_hfi_device *device, u8 *packet)
@@ -3674,11 +3483,9 @@ static struct cvp_hal_session *__get_session(struct iris_hfi_device *device,
 		u32 session_id)
 {
 	struct cvp_hal_session *temp = NULL;
-	struct msm_cvp_inst *inst = NULL;
 
 	list_for_each_entry(temp, &device->sess_head, list) {
-		inst = (struct msm_cvp_inst *)temp->session_id;
-		if (session_id == inst->sess_id)
+		if (session_id == hash32_ptr(temp))
 			return temp;
 	}
 
@@ -3755,16 +3562,14 @@ static void print_msg_hdr(void *hdr)
 {
 	struct cvp_hfi_msg_session_hdr *new_hdr =
 			(struct cvp_hfi_msg_session_hdr *)hdr;
-	dprintk(CVP_HFI, "HFI MSG received: %x %x %x %x %x %x %x %x %x %#llx\n",
-			new_hdr->header.size, new_hdr->header.packet_type,
-			new_hdr->header.session_id,
-			new_hdr->header.client_data.transaction_id,
-			new_hdr->header.client_data.data1,
-			new_hdr->header.client_data.data2,
-			new_hdr->header.client_data.data3,
-			new_hdr->header.client_data.data4,
+	dprintk(CVP_HFI, "HFI MSG received: %x %x %x %x %x %x %x %#llx\n",
+			new_hdr->size, new_hdr->packet_type,
+			new_hdr->session_id,
+			new_hdr->client_data.transaction_id,
+			new_hdr->client_data.data1,
+			new_hdr->client_data.data2,
 			new_hdr->error_type,
-			new_hdr->header.client_data.kdata);
+			new_hdr->client_data.kdata);
 }
 
 int __response_handler(struct iris_hfi_device *device)
@@ -3773,13 +3578,8 @@ int __response_handler(struct iris_hfi_device *device)
 	int packet_count = 0;
 	u8 *raw_packet = NULL;
 	bool requeue_pm_work = true;
-	struct msm_cvp_core *core = NULL;
 
 	if (!device || device->state != IRIS_STATE_INIT)
-		return 0;
-
-	core = cvp_driver->cvp_core;
-	if (!core)
 		return 0;
 
 	packets = device->response_pkt;
@@ -3794,25 +3594,12 @@ int __response_handler(struct iris_hfi_device *device)
 	}
 
 	if (device->intr_status & CVP_FATAL_INTR_BMSK) {
-		if (device->intr_status & CVP_WRAPPER_INTR_MASK_CPU_NOC_BMSK) {
+		if (device->intr_status & CVP_WRAPPER_INTR_MASK_CPU_NOC_BMSK)
 			pr_err_ratelimited(CVP_PID_TAG "Received Xtensa NOC error\n",
-					current->pid, current->tgid, "err");
-#ifdef CVP_SW_DBG_BUF_ENABLED
-			if (core)
-				core->kmd_trace.kmd_debug_log.smmu_debug.noc_error_type
-					= SMMU_XTENSA_NOC_ERROR;
-#endif
-		}
-
-		if (device->intr_status & CVP_WRAPPER_INTR_MASK_CORE_NOC_BMSK) {
+				current->pid, current->tgid, "err");
+		if (device->intr_status & CVP_WRAPPER_INTR_MASK_CORE_NOC_BMSK)
 			pr_err_ratelimited(CVP_PID_TAG "Received CVP core NOC error\n",
-					current->pid, current->tgid, "err");
-#ifdef CVP_SW_DBG_BUF_ENABLED
-			if (core)
-				core->kmd_trace.kmd_debug_log.smmu_debug.noc_error_type
-					= SMMU_CORE_NOC_ERROR;
-#endif
-		}
+				current->pid, current->tgid, "err");
 	}
 
 	/* Bleed the msg queue dry of packets */
@@ -3822,26 +3609,7 @@ int __response_handler(struct iris_hfi_device *device)
 		struct cvp_hfi_msg_session_hdr *hdr =
 			(struct cvp_hfi_msg_session_hdr *)raw_packet;
 		int rc = 0;
-		core->last_msg_ts = ktime_get();
-		if ((msm_cvp_debug & CVP_PERF) == CVP_PERF) {
-			u32 pkt_id = 0;
-			u64 aontimer = 0;
-			const char *command_name = "";
-			u32 session_id = 0;
-			u32 stream_idx = 0;
-			u64 transaction_id = 0;
 
-			session_id = hdr->header.session_id;
-			stream_idx = hdr->header.stream_idx;
-			transaction_id = hdr->header.client_data.transaction_id;
-			pkt_id  = hdr->header.packet_type;
-			command_name = get_pkt_name_from_type(pkt_id);
-			aontimer = get_aon_time();
-			dprintk(CVP_PERF,
-				"%s: msg packet %s received from fw at aontimer %llu session_id 0x%x, stream_idx 0x%x transaction_id 0x%x\n",
-				__func__, command_name, aontimer, session_id,
-				stream_idx, transaction_id);
-		}
 		print_msg_hdr(hdr);
 		rc = cvp_hfi_process_msg_packet(0, raw_packet, info);
 		if (rc) {
@@ -3857,7 +3625,6 @@ int __response_handler(struct iris_hfi_device *device)
 		/* Process the packet types that we're interested in */
 		process_system_msg(info, device, raw_packet);
 
-		/* This session_id is a double pointer to the idr_id of session */
 		session_id = get_session_id(info);
 		/*
 		 * hfi_process_msg_packet provides a session_id that's a hashed
@@ -3869,6 +3636,11 @@ int __response_handler(struct iris_hfi_device *device)
 		if (session_id) {
 			struct cvp_hal_session *session = NULL;
 
+			if (upper_32_bits((uintptr_t)*session_id) != 0) {
+				dprintk(CVP_ERR,
+					"Upper 32-bits != 0 for sess_id=%pK\n",
+					*session_id);
+			}
 			session = __get_session(device,
 					(u32)(uintptr_t)*session_id);
 			if (!session) {
@@ -4027,6 +3799,7 @@ static void iris_hfi_wd_work_handler(struct work_struct *work)
 		device = core->dev_ops->hfi_device_data;
 	else
 		return;
+
 	if (msm_cvp_hw_wd_recovery) {
 		dprintk(CVP_ERR, "Cleaning up as HW WD recovery is enable %d\n",
 				msm_cvp_hw_wd_recovery);
@@ -4109,7 +3882,7 @@ skip_reset_init:
 	return rc;
 }
 
-int __reset_control_assert_name(struct iris_hfi_device *device,
+static int __reset_control_assert_name(struct iris_hfi_device *device,
 	const char *name)
 {
 	struct reset_info *rcinfo = NULL;
@@ -4140,7 +3913,7 @@ int __reset_control_assert_name(struct iris_hfi_device *device,
 	return rc;
 }
 
-int __reset_control_deassert_name(struct iris_hfi_device *device,
+static int __reset_control_deassert_name(struct iris_hfi_device *device,
 	const char *name)
 {
 	struct reset_info *rcinfo = NULL;
@@ -4170,7 +3943,7 @@ int __reset_control_deassert_name(struct iris_hfi_device *device,
 	return rc;
 }
 
-int __reset_control_acquire(struct iris_hfi_device *device,
+static int __reset_control_acquire(struct iris_hfi_device *device,
 	const char *name)
 {
 	struct reset_info *rcinfo = NULL;
@@ -4220,7 +3993,7 @@ acquire_again:
 	return rc;
 }
 
-int __reset_control_release(struct iris_hfi_device *device,
+static int __reset_control_release(struct iris_hfi_device *device,
 	const char *name)
 {
 	struct reset_info *rcinfo = NULL;
@@ -4304,14 +4077,10 @@ static void __deinit_regulators(struct iris_hfi_device *device)
 {
 	struct regulator_info *rinfo = NULL;
 
-	if (device->res->gdsc_framework_type) {
-		dprintk(CVP_INFO, "%s, Do nothing, GenPD framework\n", __func__);
-	} else {
-		iris_hfi_for_each_regulator_reverse(device, rinfo) {
-			if (rinfo->regulator) {
-				regulator_put(rinfo->regulator);
-				rinfo->regulator = NULL;
-			}
+	iris_hfi_for_each_regulator_reverse(device, rinfo) {
+		if (rinfo->regulator) {
+			regulator_put(rinfo->regulator);
+			rinfo->regulator = NULL;
 		}
 	}
 }
@@ -4321,28 +4090,22 @@ static int __init_regulators(struct iris_hfi_device *device)
 	int rc = 0;
 	struct regulator_info *rinfo = NULL;
 
-	if (device->res->gdsc_framework_type) {
-		dprintk(CVP_INFO, "%s, Do nothing, GenPD framework\n", __func__);
-		goto do_nothing;
-	} else {
-		iris_hfi_for_each_regulator(device, rinfo) {
-			rinfo->regulator = regulator_get(&device->res->pdev->dev,
+	iris_hfi_for_each_regulator(device, rinfo) {
+		rinfo->regulator = regulator_get(&device->res->pdev->dev,
+				rinfo->name);
+		if (IS_ERR_OR_NULL(rinfo->regulator)) {
+			rc = PTR_ERR(rinfo->regulator) ?: -EBADHANDLE;
+			dprintk(CVP_ERR, "Failed to get regulator: %s\n",
 					rinfo->name);
-			if (IS_ERR_OR_NULL(rinfo->regulator)) {
-				rc = PTR_ERR(rinfo->regulator) ?: -EBADHANDLE;
-				dprintk(CVP_ERR, "Failed to get regulator: %s\n",
-						rinfo->name);
-				rinfo->regulator = NULL;
-				goto err_reg_get;
-			}
+			rinfo->regulator = NULL;
+			goto err_reg_get;
 		}
-
-		return 0;
 	}
+
+	return 0;
 
 err_reg_get:
 	__deinit_regulators(device);
-do_nothing:
 	return rc;
 }
 
@@ -4521,7 +4284,7 @@ disable_regulator_failed:
 	return rc;
 }
 
-int __disable_hw_power_collapse(struct iris_hfi_device *device)
+static int __disable_hw_power_collapse(struct iris_hfi_device *device)
 {
 	int rc = 0;
 
@@ -4535,36 +4298,6 @@ int __disable_hw_power_collapse(struct iris_hfi_device *device)
 		dprintk(CVP_WARN,
 			"%s : Failed to disable HW power collapse %d\n",
 				__func__, rc);
-	return rc;
-}
-
-int __enable_gdsc(struct iris_hfi_device *device,
-		const char *name)
-{
-	int rc = 0;
-
-	if (device->res->gdsc_framework_type) {
-		if (!strcmp(name, "controller")) {
-			rc = __enable_power_domain(device, "controller_pd");
-			if (rc)
-				dprintk(CVP_ERR, "Failed to enable controller pd: %d\n", rc);
-		} else {
-			rc = __enable_power_domain(device, "core_pd");
-			if (rc)
-				dprintk(CVP_ERR, "Failed to enable core pd: %d\n", rc);
-		}
-	} else {
-		if (!strcmp(name, "controller")) {
-			rc = __enable_regulator(device, "cvp");
-			if (rc)
-				dprintk(CVP_ERR, "Failed to enable controller: %s%d\n", rc);
-		} else {
-			rc = __enable_regulator(device, "cvp-core");
-			if (rc)
-				dprintk(CVP_ERR, "Failed to enable core: %d\n", rc);
-		}
-	}
-
 	return rc;
 }
 
@@ -4599,88 +4332,6 @@ static int __enable_regulator(struct iris_hfi_device *device,
 	return -EINVAL;
 }
 
-/* This API will enable the requested power_domain.
- * If HW_CNTRL is supported for given pd, this API moves
- * the power domain to HW control immediately.
- */
-static int __enable_power_domain(struct iris_hfi_device *device,
-		const char *name)
-{
-	int rc = 0;
-	struct power_domain_info *pd_info;
-
-	iris_hfi_for_each_pwr_domain(device, pd_info) {
-		if (strcmp(pd_info->name, name))
-			continue;
-		rc = pm_runtime_get_sync(pd_info->pd_device);
-		if (rc < 0) {
-			dprintk(CVP_ERR, "Failed to enable PD for %s: %d\n",
-					pd_info->name, rc);
-			return rc;
-		}
-
-		dprintk(CVP_PWR, "Enabled Power Domain for %s\n", pd_info->name);
-
-		/* This is needed as HW may turn off the core GDSC as
-		 * there is no transaction currently on HW. With
-		 * core GDSC off, we can't turn on core clock.
-		 */
-
-		if (pd_info->has_hw_power_collapse) {
-			rc = switch_core_gdsc_mode(device, TO_SW_CTRL);
-			if (rc) {
-				dprintk(CVP_ERR,
-					"Failed to acquire core gdsc control to SW: %d\n", rc);
-				return rc;
-			}
-		}
-		return 0;
-	}
-
-	dprintk(CVP_ERR, "Power Domain %s not found\n", name);
-	return -EINVAL;
-}
-
-int __disable_gdsc(struct iris_hfi_device *device,
-		const char *name)
-{
-	int rc = 0;
-
-	if (device->res->gdsc_framework_type) {
-		if (!strcmp(name, "controller")) {
-			rc = __disable_power_domain(device, "controller_pd");
-			if (rc)
-				dprintk(CVP_ERR, "Failed to disable controller pd: %d\n", rc);
-		} else {
-			/* Take back the gdsc control to SW before disabling the GDSC.
-			 * Not doing so, would not remove the votes from mmcx rail and
-			 * may lead to power issues.
-			 */
-			rc = __disable_hw_power_collapse(device);
-			if (!rc) {
-				rc = __disable_power_domain(device, "core_pd");
-				if (rc)
-					dprintk(CVP_ERR, "Failed to disable core pd: %d\n", rc);
-			} else {
-				/* Bring attention to this issue */
-				msm_cvp_res_handle_fatal_hw_error(device->res, true);
-			}
-		}
-	} else {
-		if (!strcmp(name, "controller")) {
-			rc = __disable_regulator(device, "cvp");
-			if (rc)
-				dprintk(CVP_ERR, "Failed to disable controller: %s%d\n", rc);
-		} else {
-			rc = __disable_regulator(device, "cvp-core");
-			if (rc)
-				dprintk(CVP_ERR, "Failed to disable core: %d\n", rc);
-		}
-	}
-
-	return rc;
-}
-
 static int __disable_regulator(struct iris_hfi_device *device,
 		const char *name)
 {
@@ -4697,33 +4348,6 @@ static int __disable_regulator(struct iris_hfi_device *device,
 	}
 
 	dprintk(CVP_ERR, "%s regulator %s not found\n", __func__, name);
-	return -EINVAL;
-}
-
-/* This API will move the requested power_domain
- * to SW control(if HW_CNTRL is supported) and disable it immediately.
- */
-static int __disable_power_domain(struct iris_hfi_device *device,
-		const char *name)
-{
-	int rc = 0;
-	struct power_domain_info *pd_info;
-
-	iris_hfi_for_each_pwr_domain(device, pd_info) {
-		if (strcmp(pd_info->name, name))
-			continue;
-		rc = pm_runtime_put_sync(pd_info->pd_device);
-		if (rc < 0) {
-			dprintk(CVP_ERR, "Failed to disable PD for %s: %d\n",
-					pd_info->name, rc);
-			return rc;
-		}
-
-		dprintk(CVP_PWR, "Disabled power domain for %s\n", pd_info->name);
-		return 0;
-	}
-
-	dprintk(CVP_ERR, "Power Domain %s not found\n", name);
 	return -EINVAL;
 }
 
@@ -4786,31 +4410,11 @@ static int __set_subcaches(struct iris_hfi_device *device)
 	sc_res_info = (struct cvp_hfi_resource_syscache_info_type *)resource;
 	sc_res = &(sc_res_info->rg_subcache_entries[0]);
 
-	/* Mapping of cache slices as:
-	 * cvp slice (scid:8):    HFI_SYSCACHE_TARGET_FDU, HFI_SYSCACHE_TARGET_MPU
-	 * cvpfw slice (scid:19): HFI_SYSCACHE_TARGET_EVA_CPU
-	 */
 	iris_hfi_for_each_subcache(device, sinfo) {
 		if (sinfo->isactive) {
-			if (!strcmp("cvp", sinfo->name)) {
-				sc_res[c].target_hw = HFI_SYSCACHE_TARGET_FDU;
-				sc_res[c].sc_id = sinfo->subcache->slice_id;
-				dprintk(CVP_CORE, "Subcache slice id: %d size: %d\n",
-					sinfo->subcache->slice_id, sinfo->subcache->slice_size);
-				c++;
-
-				sc_res[c].target_hw = HFI_SYSCACHE_TARGET_MPU;
-				sc_res[c].sc_id = sinfo->subcache->slice_id;
-				c++;
-			} else if (!strcmp("cvpfw", sinfo->name)) {
-				sc_res[c].target_hw = HFI_SYSCACHE_TARGET_EVA_CPU;
-				sc_res[c].sc_id = sinfo->subcache->slice_id;
-				dprintk(CVP_CORE, "Subcache slice id: %d size: %d\n",
-					sinfo->subcache->slice_id, sinfo->subcache->slice_size);
-				c++;
-			} else {
-				dprintk(CVP_ERR, "Invalid subcache %s\n", sinfo->name);
-			}
+			sc_res[c].size = sinfo->subcache->slice_size;
+			sc_res[c].sc_id = sinfo->subcache->slice_id;
+			c++;
 		}
 	}
 
@@ -4864,29 +4468,13 @@ static int __release_subcaches(struct iris_hfi_device *device)
 	sc_res_info = (struct cvp_hfi_resource_syscache_info_type *)resource;
 	sc_res = &(sc_res_info->rg_subcache_entries[0]);
 
-	/* Release resource command to Iris
-	 * Mapping of cache slices as:
-	 * cvp slice (scid:8):    HFI_SYSCACHE_TARGET_FDU, HFI_SYSCACHE_TARGET_MPU
-	 * cvpfw slice (scid:19): HFI_SYSCACHE_TARGET_EVA_CPU
-	 */
+	/* Release resource command to Iris */
 	iris_hfi_for_each_subcache_reverse(device, sinfo) {
 		if (sinfo->isset) {
-			if (!strcmp("cvp", sinfo->name)) {
-				sc_res[c].target_hw = HFI_SYSCACHE_TARGET_FDU;
-				sc_res[c].sc_id = sinfo->subcache->slice_id;
-				c++;
-
-				sc_res[c].target_hw = HFI_SYSCACHE_TARGET_MPU;
-				sc_res[c].sc_id = sinfo->subcache->slice_id;
-				c++;
-
-			} else if (!strcmp("cvpfw", sinfo->name)) {
-				sc_res[c].target_hw = HFI_SYSCACHE_TARGET_EVA_CPU;
-				sc_res[c].sc_id = sinfo->subcache->slice_id;
-				c++;
-			} else {
-				dprintk(CVP_ERR, "Invalid subcache %s\n", sinfo->name);
-			}
+			/* Update the entry */
+			sc_res[c].size = sinfo->subcache->slice_size;
+			sc_res[c].sc_id = sinfo->subcache->slice_id;
+			c++;
 			sinfo->isset = false;
 		}
 	}
@@ -4933,9 +4521,43 @@ static int __disable_subcaches(struct iris_hfi_device *device)
 	return 0;
 }
 
+static void interrupt_init_iris2(struct iris_hfi_device *device)
+{
+	u32 mask_val = 0;
 
+	/* All interrupts should be disabled initially 0x1F6 : Reset value */
+	mask_val = __read_register(device, CVP_WRAPPER_INTR_MASK);
 
+	/* Write 0 to unmask CPU and WD interrupts */
+	mask_val &= ~(CVP_FATAL_INTR_BMSK | CVP_WRAPPER_INTR_MASK_A2HCPU_BMSK);
+	__write_register(device, CVP_WRAPPER_INTR_MASK, mask_val);
+	dprintk(CVP_REG, "Init irq: reg: %x, mask value %x\n",
+		CVP_WRAPPER_INTR_MASK, mask_val);
 
+	mask_val = 0;
+	mask_val = __read_register(device, CVP_SS_IRQ_MASK);
+	mask_val &= ~(CVP_SS_INTR_BMASK);
+	__write_register(device, CVP_SS_IRQ_MASK, mask_val);
+	dprintk(CVP_REG, "Init irq_wd: reg: %x, mask value %x\n",
+			CVP_SS_IRQ_MASK, mask_val);
+}
+
+static void setup_dsp_uc_memmap_vpu5(struct iris_hfi_device *device)
+{
+	/* initialize DSP QTBL & UCREGION with CPU queues */
+#ifdef CVP_DSP_ENABLED
+#ifdef USE_PRESIL42
+	presil42_setup_dsp_uc_memmap_vpu5(device);
+	return;
+#endif
+	__write_register(device, HFI_DSP_QTBL_ADDR,
+		(u32)device->dsp_iface_q_table.align_device_addr);
+	__write_register(device, HFI_DSP_UC_REGION_ADDR,
+		(u32)device->dsp_iface_q_table.align_device_addr);
+	__write_register(device, HFI_DSP_UC_REGION_SIZE,
+		device->dsp_iface_q_table.mem_data.size);
+#endif
+}
 
 static int __set_ubwc_config(struct iris_hfi_device *device)
 {
@@ -4972,9 +4594,6 @@ static int __iris_power_on(struct iris_hfi_device *device)
 {
 	struct msm_cvp_core *core;
 	int rc = 0;
-	u32 reg;
-
-	CVPKERNEL_ATRACE_BEGIN("iris_power_on");
 
 	if (device->power_enabled)
 		return 0;
@@ -5011,10 +4630,6 @@ static int __iris_power_on(struct iris_hfi_device *device)
 	__write_register(device, CVP_NOC_SBM_FAULTINEN0_LOW, 0x1);
 	__write_register(device, CVP_NOC_ERR_MAINCTL_LOW_OFFS, 0x3);
 
-	/* Send TCSR SOC VERSION to FW */
-	reg = __read_tcsr_register(device, TCSR_SOW_HW_VERSION);
-	__write_register(device, CVP_CPU_CS_SCIBCMDARG3, reg);
-
 	/* Remove below 2 register writes after HW_VERSION has valid version */
 	core = cvp_driver->cvp_core;
 	if (core) {
@@ -5025,7 +4640,14 @@ static int __iris_power_on(struct iris_hfi_device *device)
 			__write_register(device, CVP_CC_SPARE1, 1);
 	}
 
-	call_iris_op(device, noc_lpi, device, IRIS_POWER_ON);
+	/* New addition to put CPU/Tensilica NOC to low power Section 6.14 (Steps 15-17)*/
+	__enter_cpu_noc_lpi(device);
+
+	/* New addition to put CVP_VIDEO_CTL NOC to low power Section 6.14 (Steps 19-21)*/
+	__enter_video_ctl_noc_lpi(device);
+
+	/* New addition to put CORE NOC to low power Section 6.14 (Steps 4-6)*/
+	__enter_core_noc_lpi(device);
 
 	/*
 	 * Re-program all of the registers that get reset as a result of
@@ -5060,7 +4682,6 @@ static int __iris_power_on(struct iris_hfi_device *device)
 		CVP_WRAPPER_DEBUG_BRIDGE_LPI_CONTROL, 0x7);
 	pr_info_ratelimited(CVP_PID_TAG "cvp (eva) powered on\n",
 		current->pid, current->tgid, "pwr");
-	CVPKERNEL_ATRACE_END("iris_power_on");
 	return 0;
 
 fail_enable_core:
@@ -5069,7 +4690,6 @@ fail_enable_controller:
 	__unvote_buses(device);
 fail_vote_buses:
 	device->power_enabled = false;
-	CVPKERNEL_ATRACE_END("iris_power_on");
 	return rc;
 }
 
@@ -5097,7 +4717,7 @@ static inline int __suspend(struct iris_hfi_device *device)
 
 	power_off_iris2(device);
 
-	if (device->global_pm_qos_latency_us && device->res->pm_qos.pm_qos_hdls)
+	if (device->res->pm_qos.latency_us && device->res->pm_qos.pm_qos_hdls)
 		cvp_pm_qos_update(device, false);
 
 	return rc;
@@ -5132,7 +4752,6 @@ int __resume(struct iris_hfi_device *device)
 {
 	int rc = 0;
 	struct msm_cvp_core *core;
-	CVPKERNEL_ATRACE_BEGIN("__resume");
 
 	if (!device) {
 		dprintk(CVP_ERR, "Invalid params: %pK\n", device);
@@ -5145,19 +4764,6 @@ int __resume(struct iris_hfi_device *device)
 	}
 
 	core = cvp_driver->cvp_core;
-	if (core) {
-		if (core->pm_resume) {
-			/* Sleeping for 100ms to allow other
-			 * subsystem to get up, in case
-			 * suspend is from PM
-			 */
-			usleep_range(100000, 120000);
-			core->pm_resume = false;
-		}
-	} else {
-		dprintk(CVP_ERR, "%s: core is not valid\n", __func__);
-		return -EINVAL;
-	}
 
 	dprintk(CVP_PWR, "Resuming from power collapse\n");
 	rc = __iris_power_on(device);
@@ -5190,7 +4796,7 @@ int __resume(struct iris_hfi_device *device)
 	 */
 	__set_threshold_registers(device);
 
-	if (device->global_pm_qos_latency_us && device->res->pm_qos.pm_qos_hdls)
+	if (device->res->pm_qos.latency_us && device->res->pm_qos.pm_qos_hdls)
 		cvp_pm_qos_update(device, true);
 
 	__sys_set_debug(device, msm_cvp_fw_debug);
@@ -5205,7 +4811,6 @@ exit:
 	/* Don't reset skip_pc_count for SYS_PC_PREP cmd */
 	if (device->last_packet_type != HFI_CMD_SYS_PC_PREP)
 		device->skip_pc_count = 0;
-	CVPKERNEL_ATRACE_END("__resume");
 	return rc;
 err_reset_core:
 	__tzbsp_set_cvp_state(TZ_SUBSYS_STATE_SUSPEND);
@@ -5213,14 +4818,13 @@ err_set_cvp_state:
 	power_off_iris2(device);
 err_iris_power_on:
 	dprintk(CVP_ERR, "Failed to resume from power collapse\n");
-	CVPKERNEL_ATRACE_END("__resume");
 	return rc;
 }
 
 static int __power_on_init(struct iris_hfi_device *device)
 {
 	int rc = 0;
-	CVPKERNEL_ATRACE_BEGIN("__power_on_init");
+
 	/* Initialize resources */
 	rc = __init_resources(device, device->res);
 	if (rc) {
@@ -5239,7 +4843,7 @@ static int __power_on_init(struct iris_hfi_device *device)
 		dprintk(CVP_ERR, "Failed to power on iris in in load_fw\n");
 		goto fail_iris_init;
 	}
-	CVPKERNEL_ATRACE_END("__power_on_init");
+
 	return rc;
 fail_iris_init:
 	__deinit_resources(device);
@@ -5276,6 +4880,11 @@ static void __unload_fw(struct iris_hfi_device *device)
 	cancel_delayed_work(&iris_hfi_pm_work);
 	if (device->state != IRIS_STATE_DEINIT)
 		flush_workqueue(device->iris_pm_workq);
+
+	if (msm_cvp_smmu_fault_recovery) {
+		if (device)
+			call_hfi_op(core->dev_ops, debug_hook, device);
+	}
 
 	unload_cvp_fw_impl(device);
 	__interface_queues_release(device);
@@ -5329,7 +4938,70 @@ static int iris_hfi_get_core_capabilities(void *dev)
 	return 0;
 }
 
-void __print_reg_details_errlog1_high(u32 val)
+#ifdef CONFIG_EVA_PINEAPPLE
+static const char * const mid_names[16] = {
+	"CVP_FW",
+	"ARP_DATA",
+	"CVP_MPU_PIXEL",
+	"CVP_MPU_NON_PIXEL",
+	"CVP_FDU_PIXEL",
+	"CVP_FDU_NON_PIXEL",
+	"CVP_GCE_PIXEL",
+	"CVP_GCE_NON_PIXEL",
+	"CVP_TOF_PIXEL",
+	"CVP_TOF_NON_PIXEL",
+	"CVP_VADL_PIXEL",
+	"CVP_VADL_NON_PIXEL",
+	"CVP_RGE_NON_PIXEL",
+	"CVP_CDM",
+	"Invalid",
+	"Invalid"
+};
+#elif CONFIG_EVA_SUN
+static const char * const mid_names[25] = {
+	"CVP_FW",
+	"ARP_DATA",
+	"CDM_DATA",
+	"Invalid",
+	"CVP_MPU_PIXEL",
+	"CVP_MPU_NON_PIXEL",
+	"Invalid",
+	"Invalid",
+	"CVP_FDU_PIXEL",
+	"CVP_FDU_NON_PIXEL",
+	"Invalid",
+	"Invalid",
+	"CVP_GCE_PIXEL",
+	"CVP_GCE_NON_PIXEL",
+	"Invalid",
+	"Invalid",
+	"CVP_TOF_PIXEL",
+	"CVP_TOF_NON_PIXEL",
+	"Invalid",
+	"Invalid",
+	"Invalid",
+	"Invalid",
+	"Invalid",
+	"Invalid",
+	"CVP_RGE_NON_PIXEL",
+};
+#endif
+
+static void __print_reg_details_errlog3_low(u32 val)
+{
+	u32 mid, sid;
+
+#ifdef CONFIG_EVA_PINEAPPLE
+	mid = (val >> 5) & 0xF;
+#elif CONFIG_EVA_SUN
+	mid = (val >> 5) & 0x1F;
+#endif
+	sid = (val >> 2) & 0x7;
+	dprintk(CVP_ERR, "CVP_NOC_CORE_ERL_MAIN_ERRLOG3_LOW:     %#x\n", val);
+	dprintk(CVP_ERR, "Sub-client:%s, SID: %d\n", mid_names[mid], sid);
+}
+
+static void __print_reg_details_errlog1_high(u32 val)
 {
 	u32 mid, pid;
 	char *rw;
@@ -5347,7 +5019,7 @@ void __print_reg_details_errlog1_high(u32 val)
 	dprintk(CVP_ERR, "MID: %#x, PID: %#x, Op: %s\n", mid, pid, rw);
 }
 
-void __err_log(bool logging, u32 *data, const char *name, u32 val)
+static void __err_log(bool logging, u32 *data, const char *name, u32 val)
 {
 	if (logging)
 		*data = val;
@@ -5355,7 +5027,138 @@ void __err_log(bool logging, u32 *data, const char *name, u32 val)
 	dprintk(CVP_ERR, "%s: %#x\n", name, val);
 }
 
+static void __noc_error_info_iris2(struct iris_hfi_device *device)
+{
+	struct msm_cvp_core *core;
+	struct cvp_noc_log *noc_log;
+	u32 val = 0, regi, regiii;
+	bool log_required = false;
+	int rc;
 
+	core = cvp_driver->cvp_core;
+
+	if (!core->ssr_count && core->resources.max_ssr_allowed > 1)
+		log_required = true;
+
+	noc_log = &core->log.noc_log;
+
+	if (noc_log->used) {
+		dprintk(CVP_WARN, "Data already in NoC log, skip logging\n");
+		return;
+	}
+	noc_log->used = 1;
+	rc = 0;
+
+	__disable_hw_power_collapse(device);
+
+	val = call_iris_op(device, check_core_power_on, device);
+	regi = __read_register(device, CVP_AON_WRAPPER_CVP_NOC_CORE_CLK_CONTROL);
+	regiii = __read_register(device, CVP_WRAPPER_CORE_CLOCK_CONFIG);
+	dprintk(CVP_ERR, "noc reg check: %#x %#x %#x\n",
+		val, regi, regiii);
+
+	val = __read_register(device, CVP_NOC_ERR_SWID_LOW_OFFS);
+	__err_log(log_required, &noc_log->err_ctrl_swid_low,
+			"CVP_NOC_ERL_MAIN_SWID_LOW", val);
+	val = __read_register(device, CVP_NOC_ERR_SWID_HIGH_OFFS);
+	__err_log(log_required, &noc_log->err_ctrl_swid_high,
+			"CVP_NOC_ERL_MAIN_SWID_HIGH", val);
+	val = __read_register(device, CVP_NOC_ERR_MAINCTL_LOW_OFFS);
+	__err_log(log_required, &noc_log->err_ctrl_mainctl_low,
+			"CVP_NOC_ERL_MAIN_MAINCTL_LOW", val);
+	val = __read_register(device, CVP_NOC_ERR_ERRVLD_LOW_OFFS);
+	__err_log(log_required, &noc_log->err_ctrl_errvld_low,
+			"CVP_NOC_ERL_MAIN_ERRVLD_LOW", val);
+	val = __read_register(device, CVP_NOC_ERR_ERRCLR_LOW_OFFS);
+	__err_log(log_required, &noc_log->err_ctrl_errclr_low,
+			"CVP_NOC_ERL_MAIN_ERRCLR_LOW", val);
+	val = __read_register(device, CVP_NOC_ERR_ERRLOG0_LOW_OFFS);
+	__err_log(log_required, &noc_log->err_ctrl_errlog0_low,
+			 "CVP_NOC_ERL_MAIN_ERRLOG0_LOW", val);
+	val = __read_register(device, CVP_NOC_ERR_ERRLOG0_HIGH_OFFS);
+	__err_log(log_required, &noc_log->err_ctrl_errlog0_high,
+			"CVP_NOC_ERL_MAIN_ERRLOG0_HIGH", val);
+	val = __read_register(device, CVP_NOC_ERR_ERRLOG1_LOW_OFFS);
+	__err_log(log_required, &noc_log->err_ctrl_errlog1_low,
+			"CVP_NOC_ERL_MAIN_ERRLOG1_LOW", val);
+	val = __read_register(device, CVP_NOC_ERR_ERRLOG1_HIGH_OFFS);
+	__err_log(log_required, &noc_log->err_ctrl_errlog1_high,
+			"CVP_NOC_ERL_MAIN_ERRLOG1_HIGH", val);
+	val = __read_register(device, CVP_NOC_ERR_ERRLOG2_LOW_OFFS);
+	__err_log(log_required, &noc_log->err_ctrl_errlog2_low,
+			"CVP_NOC_ERL_MAIN_ERRLOG2_LOW", val);
+	val = __read_register(device, CVP_NOC_ERR_ERRLOG2_HIGH_OFFS);
+	__err_log(log_required, &noc_log->err_ctrl_errlog2_high,
+			"CVP_NOC_ERL_MAIN_ERRLOG2_HIGH", val);
+	val = __read_register(device, CVP_NOC_ERR_ERRLOG3_LOW_OFFS);
+	__err_log(log_required, &noc_log->err_ctrl_errlog3_low,
+			"CVP_NOC_ERL_MAIN_ERRLOG3_LOW", val);
+	val = __read_register(device, CVP_NOC_ERR_ERRLOG3_HIGH_OFFS);
+	__err_log(log_required, &noc_log->err_ctrl_errlog3_high,
+			"CVP_NOC_ERL_MAIN_ERRLOG3_HIGH", val);
+
+#ifdef CONFIG_EVA_PINEAPPLE
+	/* Lanai HW bug workaround */
+	rc = call_iris_op(device, reset_control_acquire_name, device, "cvp_xo_reset");
+	if (rc) {
+		dprintk(CVP_WARN, "%s Fail acquire xo_reset\n", __func__);
+		return;
+	}
+#endif
+
+	val = __read_register(device, CVP_NOC_CORE_ERR_SWID_LOW_OFFS);
+	__err_log(log_required, &noc_log->err_core_swid_low,
+			"CVP_NOC__CORE_ERL_MAIN_SWID_LOW", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_SWID_HIGH_OFFS);
+	__err_log(log_required, &noc_log->err_core_swid_high,
+			"CVP_NOC_CORE_ERL_MAIN_SWID_HIGH", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_MAINCTL_LOW_OFFS);
+	__err_log(log_required, &noc_log->err_core_mainctl_low,
+			"CVP_NOC_CORE_ERL_MAIN_MAINCTL_LOW", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRVLD_LOW_OFFS);
+	__err_log(log_required, &noc_log->err_core_errvld_low,
+			"CVP_NOC_CORE_ERL_MAIN_ERRVLD_LOW", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRCLR_LOW_OFFS);
+	__err_log(log_required, &noc_log->err_core_errclr_low,
+			"CVP_NOC_CORE_ERL_MAIN_ERRCLR_LOW", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRLOG0_LOW_OFFS);
+	__err_log(log_required, &noc_log->err_core_errlog0_low,
+			"CVP_NOC_CORE_ERL_MAIN_ERRLOG0_LOW", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRLOG0_HIGH_OFFS);
+	__err_log(log_required, &noc_log->err_core_errlog0_high,
+			"CVP_NOC_CORE_ERL_MAIN_ERRLOG0_HIGH", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRLOG1_LOW_OFFS);
+	__err_log(log_required, &noc_log->err_core_errlog1_low,
+			"CVP_NOC_CORE_ERL_MAIN_ERRLOG1_LOW", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRLOG1_HIGH_OFFS);
+	__err_log(log_required, &noc_log->err_core_errlog1_high,
+			"CVP_NOC_CORE_ERL_MAIN_ERRLOG1_HIGH", val);
+	__print_reg_details_errlog1_high(val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRLOG2_LOW_OFFS);
+	__err_log(log_required, &noc_log->err_core_errlog2_low,
+			"CVP_NOC_CORE_ERL_MAIN_ERRLOG2_LOW", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRLOG2_HIGH_OFFS);
+	__err_log(log_required, &noc_log->err_core_errlog2_high,
+			"CVP_NOC_CORE_ERL_MAIN_ERRLOG2_HIGH", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRLOG3_LOW_OFFS);
+	__err_log(log_required, &noc_log->err_core_errlog3_low,
+			"CORE ERRLOG3_LOW, below details", val);
+	__print_reg_details_errlog3_low(val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRLOG3_HIGH_OFFS);
+	__err_log(log_required, &noc_log->err_core_errlog3_high,
+			"CVP_NOC_CORE_ERL_MAIN_ERRLOG3_HIGH", val);
+	__write_register(device, CVP_NOC_CORE_ERR_ERRCLR_LOW_OFFS, 0x1);
+#ifdef CONFIG_EVA_PINEAPPLE
+	/* Lanai HW bug workaround */
+	call_iris_op(device, reset_control_release_name, device, "cvp_xo_reset");
+#endif
+#define CVP_SS_CLK_HALT 0x8
+#define CVP_SS_CLK_EN 0xC
+#define CVP_VPU_WRAPPER_CORE_CONFIG 0xB0088
+	__write_register(device, CVP_SS_CLK_HALT, 0);
+	__write_register(device, CVP_SS_CLK_EN, 0x3f);
+	__write_register(device, CVP_VPU_WRAPPER_CORE_CONFIG, 0);
+}
 
 static int iris_hfi_noc_error_info(void *dev)
 {
@@ -5440,7 +5243,6 @@ static struct iris_hfi_device *__add_device(struct msm_cvp_platform_resources *r
 
 	hdevice->res = res;
 	hdevice->callback = callback;
-	hdevice->global_pm_qos_latency_us = PM_QOS_RESUME_LATENCY_DEFAULT_VALUE;
 
 	__init_cvp_ops(hdevice);
 
@@ -5523,24 +5325,13 @@ static int iris_hfi_validate_session(void *sess, const char *func)
 	struct cvp_hal_session *session = sess;
 	int rc = 0;
 	struct iris_hfi_device *device;
-	struct msm_cvp_core *core;
 
-	if (!session) {
+	if (!session || !session->device) {
 		dprintk(CVP_ERR, " %s Invalid Params %pK\n", __func__, session);
 		return -EINVAL;
 	}
 
-	core = cvp_driver->cvp_core;
-	if (!core || !core->dev_ops) {
-		dprintk(CVP_ERR, "%s: invalid core\n", __func__);
-		return -EINVAL;
-	}
-	device = (struct iris_hfi_device *)core->dev_ops->hfi_device_data;
-	if (!device) {
-		dprintk(CVP_ERR, "%s: invalid device\n", __func__);
-		return -EINVAL;
-	}
-
+	device = session->device;
 	mutex_lock(&device->lock);
 	if (!__is_session_valid(device, session, func))
 		rc = -ECONNRESET;
@@ -5549,8 +5340,1196 @@ static int iris_hfi_validate_session(void *sess, const char *func)
 	return rc;
 }
 
+/***************************************************************************
+ *
+ * Start Arch specific implementation
+ *
+ ***************************************************************************/
+
+#ifdef CONFIG_EVA_PINEAPPLE
+static int __check_ctl_power_on(struct iris_hfi_device *device)
+{
+	u32 reg;
+
+	reg = __read_register(device, CVP_CC_MVS1C_GDSCR);
+	if (!(reg & 0x80000000))
+		return -1;
+
+	reg = __read_register(device, CVP_CC_MVS1C_CBCR);
+	if (reg & 0x80000000)
+		return -2;
+
+	return 0;
+}
+
+static int __check_core_power_on(struct iris_hfi_device *device)
+{
+	u32 reg;
+
+	reg = __read_register(device, CVP_CC_MVS1_GDSCR);
+	if (!(reg & 0x80000000))
+		return -1;
+
+	reg = __read_register(device, CVP_CC_MVS1_CBCR);
+	if (reg & 0x80000000)
+		return -2;
+
+	return 0;
+}
+
+static int __power_off_controller(struct iris_hfi_device *device)
+{
+	u32 lpi_status, reg_status = 0, count = 0, max_count = 1000;
+	u32 sbm_ln0_low;
+	int rc;
+
+	u32 spare_val, spare_status;
+
+	/* HPG 6.2.2 Step 1  */
+	__write_register(device, CVP_CPU_CS_X2RPMh, 0x3);
+
+	/* HPG 6.2.2 Step 2, noc to low power */
+
+	/* New addition to put CPU/Tensilica to low power */
+	reg_status = 0;
+	count = 0;
+	__write_register(device, CVP_WRAPPER_CPU_NOC_LPI_CONTROL, 0x1);
+	while (!reg_status && count < max_count) {
+		lpi_status =
+			 __read_register(device,
+				CVP_WRAPPER_CPU_NOC_LPI_STATUS);
+		reg_status = lpi_status & BIT(0);
+		/* Wait for CPU noc lpi status to be set */
+		usleep_range(50, 100);
+		count++;
+	}
+	sbm_ln0_low = __read_register(device, CVP_NOC_SBM_SENSELN0_LOW);
+	dprintk(CVP_PWR,
+		"CPU Noc: lpi_status %x noc_status %x (count %d) 0x%x\n",
+		lpi_status, reg_status, count, sbm_ln0_low);
+	if (count == max_count) {
+		u32 pc_ready, wfi_status;
+
+		wfi_status = __read_register(device, CVP_WRAPPER_CPU_STATUS);
+		pc_ready = __read_register(device, CVP_CTRL_STATUS);
+
+		dprintk(CVP_WARN,
+			"CPU NOC not in qaccept status %x %x %x %x\n",
+			reg_status, lpi_status, wfi_status, pc_ready);
+
+		call_iris_op(device, print_sbm_regs, device);
+	}
 
 
+	/* HPG 6.2.2 Step 3, debug bridge to low power BYPASSED */
+
+	/* HPG 6.2.2 Step 4, debug bridge to lpi release */
+	__write_register(device,
+		CVP_WRAPPER_DEBUG_BRIDGE_LPI_CONTROL, 0x0);
+	lpi_status = 0x1;
+	count = 0;
+	while (lpi_status && count < max_count) {
+		lpi_status = __read_register(device,
+				 CVP_WRAPPER_DEBUG_BRIDGE_LPI_STATUS);
+		usleep_range(50, 100);
+		count++;
+	}
+	dprintk(CVP_PWR,
+		"DBLP Release: lpi_status %d(count %d)\n",
+		lpi_status, count);
+	if (count == max_count) {
+		dprintk(CVP_WARN,
+			"DBLP Release: lpi_status %x\n", lpi_status);
+	}
+
+	/* PDXFIFO reset: addition for Kailua / Lanai */
+
+	__write_register(device, CVP_WRAPPER_AXI_CLOCK_CONFIG, 0x3);
+	__write_register(device, CVP_WRAPPER_QNS4PDXFIFO_RESET, 0x1);
+	__write_register(device, CVP_WRAPPER_QNS4PDXFIFO_RESET, 0x0);
+	__write_register(device, CVP_WRAPPER_AXI_CLOCK_CONFIG, 0x0);
+
+	/* HPG 6.2.2 Step 5 */
+	msm_cvp_disable_unprepare_clk(device, "cvp_clk");
+
+	rc = call_iris_op(device, reset_control_assert_name, device, "cvp_axi_reset");
+	if (rc)
+		dprintk(CVP_ERR, "%s: assert cvp_axi_reset failed\n", __func__);
+
+	rc = call_iris_op(device, reset_control_assert_name, device, "cvp_core_reset");
+	if (rc)
+		dprintk(CVP_ERR, "%s: assert cvp_core_reset failed\n", __func__);
+	/* wait for deassert */
+	usleep_range(1000, 1050);
+
+	rc = call_iris_op(device, reset_control_deassert_name, device, "cvp_axi_reset");
+	if (rc)
+		dprintk(CVP_ERR, "%s: de-assert cvp_axi_reset failed\n", __func__);
+
+	rc = call_iris_op(device, reset_control_deassert_name, device, "cvp_core_reset");
+	if (rc)
+		dprintk(CVP_ERR, "%s: de-assert cvp_core_reset failed\n", __func__);
+
+	/* disable EVA NoC clock */
+	__write_register(device, CVP_AON_WRAPPER_CVP_NOC_CORE_CLK_CONTROL, 0x1);
+
+	/* enable EVA NoC reset */
+	__write_register(device, CVP_AON_WRAPPER_CVP_NOC_CORE_SW_RESET, 0x1);
+
+	rc = call_iris_op(device, reset_control_acquire_name, device, "cvp_xo_reset");
+	if (rc) {
+		dprintk(CVP_ERR, "FATAL ERROR, HPG step 17 to 20 will be bypassed\n");
+		goto skip_xo_reset;
+	}
+	spare_status = 0x1;
+	while (spare_status != 0x0) {
+		spare_val = __read_register(device, CVP_AON_WRAPPER_SPARE);
+		spare_status = spare_val & 0x2;
+		usleep_range(50, 100);
+	}
+	__write_register(device, CVP_AON_WRAPPER_SPARE, 0x1);
+	rc = call_iris_op(device, reset_control_assert_name, device, "cvp_xo_reset");
+	if (rc)
+		dprintk(CVP_ERR, "%s: assert cvp_xo_reset failed\n", __func__);
+
+	/* de-assert EVA_NoC reset */
+	__write_register(device, CVP_AON_WRAPPER_CVP_NOC_CORE_SW_RESET, 0x0);
+
+	/* de-assert EVA video_cc XO reset and enable video_cc XO clock after 80us */
+	usleep_range(80, 100);
+	rc = call_iris_op(device, reset_control_deassert_name, device, "cvp_xo_reset");
+	if (rc)
+		dprintk(CVP_ERR, "%s: de-assert cvp_xo_reset failed\n", __func__);
+
+	/* clear XO mask bit - this step was missing in previous sequence */
+	__write_register(device, CVP_AON_WRAPPER_SPARE, 0x0);
+
+	call_iris_op(device, reset_control_release_name, device, "cvp_xo_reset");
+
+skip_xo_reset:
+	/* enable EVA NoC clock */
+	__write_register(device, CVP_AON_WRAPPER_CVP_NOC_CORE_CLK_CONTROL, 0x0);
+
+	/* De-assert EVA_CTL Force Sleep Retention */
+
+	usleep_range(400, 500);
+
+	/* HPG 6.2.2 Step 6 */
+	__disable_regulator(device, "cvp");
+
+	/* HPG 6.2.2 Step 7 */
+	rc = msm_cvp_disable_unprepare_clk(device, "gcc_video_axi1");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to enable axi1 clk: %d\n", rc);
+	}
+
+	rc = msm_cvp_disable_unprepare_clk(device, "sleep_clk");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to disable sleep clk: %d\n", rc);
+	}
+
+	return 0;
+}
+
+static int __power_off_core(struct iris_hfi_device *device)
+{
+	u32 reg_status = 0, lpi_status, config, value = 0, count = 0;
+	u32 warn_flag = 0, max_count = 10;
+
+	value = __read_register(device, CVP_CC_MVS1_GDSCR);
+	if (!(value & 0x80000000)) {
+		/*
+		 * Core has been powered off by f/w.
+		 * Check NOC reset registers to ensure
+		 * NO outstanding NoC transactions
+		 */
+		value = __read_register(device, CVP_NOC_RESET_ACK);
+		if (value) {
+			dprintk(CVP_WARN,
+				"Core off with NOC RESET ACK non-zero %x\n",
+				value);
+			call_iris_op(device, print_sbm_regs, device);
+		}
+		__disable_regulator(device, "cvp-core");
+		msm_cvp_disable_unprepare_clk(device, "core_clk");
+		msm_cvp_disable_unprepare_clk(device, "video_cc_mvs1_clk_src");
+		return 0;
+	 } else if (!(value & 0x2)) {
+		/*
+		 * HW_CONTROL PC disabled, then core is powered on for
+		 * CVP NoC access
+		 */
+		__disable_regulator(device, "cvp-core");
+                msm_cvp_disable_unprepare_clk(device, "core_clk");
+                msm_cvp_disable_unprepare_clk(device, "video_cc_mvs1_clk_src");
+                return 0;
+	}
+
+	dprintk(CVP_PWR, "Driver controls Core power off now\n");
+	/*
+	 * check to make sure core clock branch enabled else
+	 * we cannot read core idle register
+	 */
+	config = __read_register(device, CVP_WRAPPER_CORE_CLOCK_CONFIG);
+	if (config) {
+		dprintk(CVP_PWR,
+		"core clock config not enabled, enable it to access core\n");
+		__write_register(device, CVP_WRAPPER_CORE_CLOCK_CONFIG, 0);
+	}
+
+	/*
+	 * add MNoC idle check before collapsing MVS1 per HPG update
+	 * poll for NoC DMA idle -> HPG 6.2.1
+	 *
+	 */
+	do {
+		value = __read_register(device, CVP_SS_IDLE_STATUS);
+		if (value & 0x400000)
+			break;
+		else
+			usleep_range(1000, 2000);
+		count++;
+	} while (count < max_count);
+
+	if (count == max_count) {
+		dprintk(CVP_WARN, "Core fail to go idle %x\n", value);
+		warn_flag = 1;
+	}
+
+	count = 0;
+	max_count = 1000;
+	__write_register(device, CVP_AON_WRAPPER_CVP_NOC_LPI_CONTROL, 0x1);
+	while (!reg_status && count < max_count) {
+		lpi_status =
+			 __read_register(device,
+				CVP_AON_WRAPPER_CVP_NOC_LPI_STATUS);
+		reg_status = lpi_status & BIT(0);
+		/* Wait for Core noc lpi status to be set */
+		usleep_range(50, 100);
+		count++;
+	}
+	dprintk(CVP_PWR,
+		"Core Noc: lpi_status %x noc_status %x (count %d)\n",
+		lpi_status, reg_status, count);
+	if (count == max_count) {
+		u32 pc_ready, wfi_status;
+
+		wfi_status = __read_register(device, CVP_WRAPPER_CPU_STATUS);
+		pc_ready = __read_register(device, CVP_CTRL_STATUS);
+
+		dprintk(CVP_WARN,
+			"Core NOC not in qaccept status %x %x %x %x\n",
+			reg_status, lpi_status, wfi_status, pc_ready);
+
+		warn_flag = 1;
+	}
+
+	__write_register(device, CVP_AON_WRAPPER_CVP_NOC_LPI_CONTROL, 0x0);
+
+	if (warn_flag)
+		call_iris_op(device, print_sbm_regs, device);
+
+	/* Reset both sides of 2 ahb2ahb_bridges (TZ and non-TZ) */
+	__write_register(device, CVP_AHB_BRIDGE_SYNC_RESET, 0x3);
+	__write_register(device, CVP_AHB_BRIDGE_SYNC_RESET, 0x2);
+	__write_register(device, CVP_AHB_BRIDGE_SYNC_RESET, 0x0);
+
+	__write_register(device, CVP_WRAPPER_CORE_CLOCK_CONFIG, config);
+
+	__disable_hw_power_collapse(device);
+	usleep_range(100, 200);
+	__disable_regulator(device, "cvp-core");
+	msm_cvp_disable_unprepare_clk(device, "core_clk");
+	msm_cvp_disable_unprepare_clk(device, "video_cc_mvs1_clk_src");
+	return 0;
+}
+
+static int __power_on_controller(struct iris_hfi_device *device)
+{
+	int rc = 0;
+	CVPKERNEL_ATRACE_BEGIN("__power_on_controller");
+
+	rc = __enable_regulator(device, "cvp");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to enable ctrler: %d\n", rc);
+		return rc;
+	}
+
+	rc = msm_cvp_prepare_enable_clk(device, "sleep_clk");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to enable sleep clk: %d\n", rc);
+		goto fail_reset_clks;
+	}
+
+	rc = call_iris_op(device, reset_control_assert_name, device, "cvp_axi_reset");
+	if (rc)
+		dprintk(CVP_ERR, "%s: assert cvp_axi_reset failed\n", __func__);
+
+	rc = call_iris_op(device, reset_control_assert_name, device, "cvp_core_reset");
+	if (rc)
+		dprintk(CVP_ERR, "%s: assert cvp_core_reset failed\n", __func__);
+	/* wait for deassert */
+	usleep_range(300, 400);
+
+	rc = call_iris_op(device, reset_control_deassert_name, device, "cvp_axi_reset");
+	if (rc)
+		dprintk(CVP_ERR, "%s: de-assert cvp_axi_reset failed\n", __func__);
+	rc = call_iris_op(device, reset_control_deassert_name, device, "cvp_core_reset");
+	if (rc)
+		dprintk(CVP_ERR, "%s: de-assert cvp_core_reset failed\n", __func__);
+
+	rc = msm_cvp_prepare_enable_clk(device, "gcc_video_axi1");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to enable axi1 clk: %d\n", rc);
+		goto fail_reset_clks;
+	}
+
+	rc = msm_cvp_prepare_enable_clk(device, "cvp_clk");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to enable cvp_clk: %d\n", rc);
+		goto fail_enable_clk;
+	}
+
+	dprintk(CVP_PWR, "EVA controller powered on\n");
+	CVPKERNEL_ATRACE_END("__power_on_controller");
+	return 0;
+
+fail_enable_clk:
+	msm_cvp_disable_unprepare_clk(device, "gcc_video_axi1");
+fail_reset_clks:
+	__disable_regulator(device, "cvp");
+	return rc;
+}
+
+static int __power_on_core(struct iris_hfi_device *device)
+{
+	int rc = 0;
+	CVPKERNEL_ATRACE_BEGIN("__power_on_core");
+
+	rc = __enable_regulator(device, "cvp-core");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to enable core: %d\n", rc);
+		return rc;
+	}
+
+	rc = msm_cvp_prepare_enable_clk(device, "video_cc_mvs1_clk_src");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to enable video_cc_mvs1_clk_src:%d\n",
+			rc);
+		__disable_regulator(device, "cvp-core");
+		return rc;
+	}
+
+	rc = msm_cvp_prepare_enable_clk(device, "core_clk");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to enable core_clk: %d\n", rc);
+		__disable_regulator(device, "cvp-core");
+		return rc;
+	}
+
+#ifdef CONFIG_EVA_SUN
+	__write_register(device, CVP_AON_WRAPPER_CVP_NOC_ARCG_CONTROL, 0);
+	__write_register(device, CVP_NOC_RCGCONTROLLER_HYSTERESIS_LOW, 0x3ff);
+	__write_register(device, CVP_NOC_RCG_VNOC_NOC_CLK_FORCECLOCKON_LOW, 1);
+	__write_register(device, CVP_NOC_RCGCONTROLLER_MAINCTL_LOW, 1);
+	usleep_range(50, 100);
+	__write_register(device, CVP_NOC_RCG_VNOC_NOC_CLK_FORCECLOCKON_LOW, 0);
+#endif
+	dprintk(CVP_PWR, "EVA core powered on\n");
+	CVPKERNEL_ATRACE_END("__power_on_core");
+	return 0;
+}
+
+static void __print_sidebandmanager_regs(struct iris_hfi_device *device)
+{
+	u32 sbm_ln0_low, axi_cbcr;
+	u32 main_sbm_ln0_low = 0xdeadbeef, main_sbm_ln0_high = 0xdeadbeef;
+	u32 main_sbm_ln1_high = 0xdeadbeef, cpu_cs_x2rpmh;
+	int rc;
+
+	sbm_ln0_low =
+		__read_register(device, CVP_NOC_SBM_SENSELN0_LOW);
+
+	cpu_cs_x2rpmh = __read_register(device, CVP_CPU_CS_X2RPMh);
+
+	__write_register(device, CVP_CPU_CS_X2RPMh,
+			(cpu_cs_x2rpmh | CVP_CPU_CS_X2RPMh_SWOVERRIDE_BMSK));
+	usleep_range(500, 1000);
+	cpu_cs_x2rpmh = __read_register(device, CVP_CPU_CS_X2RPMh);
+	if (!(cpu_cs_x2rpmh & CVP_CPU_CS_X2RPMh_SWOVERRIDE_BMSK)) {
+		dprintk(CVP_WARN,
+			"failed set CVP_CPU_CS_X2RPMH mask %x\n",
+			cpu_cs_x2rpmh);
+		goto exit;
+	}
+
+	axi_cbcr = __read_gcc_register(device, CVP_GCC_VIDEO_AXI1_CBCR);
+	if (axi_cbcr & 0x80000000) {
+		dprintk(CVP_WARN, "failed to turn on AXI clock %x\n",
+			axi_cbcr);
+		goto exit;
+	}
+
+	rc = call_iris_op(device, reset_control_acquire_name, device, "cvp_xo_reset");
+	if (rc) {
+		dprintk(CVP_WARN, "%s Fail acquire xo_reset\n", __func__);
+		goto exit;
+	}
+	main_sbm_ln0_low = __read_register(device,
+			CVP_NOC_MAIN_SIDEBANDMANAGER_SENSELN0_LOW);
+	main_sbm_ln0_high = __read_register(device,
+			CVP_NOC_MAIN_SIDEBANDMANAGER_SENSELN0_HIGH);
+	main_sbm_ln1_high = __read_register(device,
+			CVP_NOC_MAIN_SIDEBANDMANAGER_SENSELN1_HIGH);
+	call_iris_op(device, reset_control_release_name, device, "cvp_xo_reset");
+
+exit:
+	cpu_cs_x2rpmh = cpu_cs_x2rpmh & (~CVP_CPU_CS_X2RPMh_SWOVERRIDE_BMSK);
+	__write_register(device, CVP_CPU_CS_X2RPMh, cpu_cs_x2rpmh);
+	dprintk(CVP_WARN, "Sidebandmanager regs %x %x %x %x %x\n",
+		sbm_ln0_low, main_sbm_ln0_low,
+		main_sbm_ln0_high, main_sbm_ln1_high,
+		cpu_cs_x2rpmh);
+}
+
+static int __enable_hw_power_collapse(struct iris_hfi_device *device)
+{
+	int rc = 0, loop = 10;
+	u32 reg_gdsc;
+
+	if (!msm_cvp_fw_low_power_mode) {
+		dprintk(CVP_PWR, "Not enabling hardware power collapse\n");
+		return 0;
+	}
+
+	rc = __hand_off_regulators(device);
+	if (rc) {
+		dprintk(CVP_WARN,
+			"%s : Failed to enable HW power collapse %d\n",
+				__func__, rc);
+		return rc;
+	}
+
+	while (loop) {
+		reg_gdsc = __read_register(device, CVP_CC_MVS1_GDSCR);
+		if (reg_gdsc & 0x80000000) {
+			usleep_range(100, 200);
+			loop--;
+		} else {
+			break;
+		}
+	}
+
+	if (!loop) {
+		dprintk(CVP_ERR, "fail to power off CORE during resume\n");
+		return -EINVAL;
+	}
+
+	return rc;
+}
+
+static int __set_registers(struct iris_hfi_device *device)
+{
+	struct msm_cvp_core *core;
+	struct msm_cvp_platform_data *pdata;
+	struct reg_set *reg_set;
+	int i;
+
+	if (!device->res) {
+		dprintk(CVP_ERR,
+			"device resources null, cannot set registers\n");
+		return -EINVAL ;
+	}
+
+	core = cvp_driver->cvp_core;
+	pdata = core->platform_data;
+
+	reg_set = &device->res->reg_set;
+	for (i = 0; i < reg_set->count; i++) {
+		__write_register(device, reg_set->reg_tbl[i].reg,
+				reg_set->reg_tbl[i].value);
+		dprintk(CVP_REG, "write_reg offset=%x, val=%x\n",
+					reg_set->reg_tbl[i].reg,
+					reg_set->reg_tbl[i].value);
+	}
+
+	i = call_iris_op(device, reset_control_acquire_name, device, "cvp_xo_reset");
+	if (i) {
+		dprintk(CVP_WARN, "%s Fail acquire xo_reset\n", __func__);
+		return -EINVAL;
+	}
+
+	__write_register(device, CVP_CPU_CS_AXI4_QOS,
+				pdata->noc_qos->axi_qos);
+	__write_register(device, CVP_NOC_RGE_PRIORITYLUT_LOW,
+				pdata->noc_qos->prioritylut_low);
+	__write_register(device, CVP_NOC_RGE_PRIORITYLUT_HIGH,
+				pdata->noc_qos->prioritylut_high);
+	__write_register(device, CVP_NOC_RGE_URGENCY_LOW,
+				pdata->noc_qos->urgency_low);
+	__write_register(device, CVP_NOC_RGE_DANGERLUT_LOW,
+				pdata->noc_qos->dangerlut_low);
+	__write_register(device, CVP_NOC_RGE_SAFELUT_LOW,
+				pdata->noc_qos->safelut_low);
+	__write_register(device, CVP_NOC_CDM_PRIORITYLUT_LOW,
+				pdata->noc_qos->prioritylut_low);
+	__write_register(device, CVP_NOC_CDM_PRIORITYLUT_HIGH,
+				pdata->noc_qos->prioritylut_high);
+	__write_register(device, CVP_NOC_CDM_URGENCY_LOW,
+				pdata->noc_qos->urgency_low);
+	__write_register(device, CVP_NOC_CDM_DANGERLUT_LOW,
+				pdata->noc_qos->dangerlut_low);
+	__write_register(device, CVP_NOC_CDM_SAFELUT_LOW,
+				pdata->noc_qos->safelut_low);
+
+	/* Below registers write moved from FW to SW to enable UBWC */
+	__write_register(device, CVP_NOC_RGE_NIU_DECCTL_LOW,
+				0x1);
+	__write_register(device, CVP_NOC_RGE_NIU_ENCCTL_LOW,
+				0x1);
+	__write_register(device, CVP_NOC_GCE_VADL_TOF_NIU_DECCTL_LOW,
+				0x1);
+	__write_register(device, CVP_NOC_GCE_VADL_TOF_NIU_ENCCTL_LOW,
+				0x1);
+	__write_register(device, CVP_NOC_CORE_ERR_MAINCTL_LOW_OFFS,
+				0x3);
+	__write_register(device, CVP_NOC_MAIN_SIDEBANDMANAGER_FAULTINEN0_LOW,
+				0x1);
+
+	call_iris_op(device, reset_control_release_name, device, "cvp_xo_reset");
+	return 0;
+}
+
+static void __dump_noc_regs(struct iris_hfi_device *device)
+{
+	return;
+}
+
+#elif CONFIG_EVA_SUN
+static int __check_ctl_power_on_v1(struct iris_hfi_device *device)
+{
+	u32 reg;
+
+	reg = __read_register(device, CVP_CC_MVS0C_GDSCR);
+	if (!(reg & 0x80000000))
+		return -1;
+
+	reg = __read_register(device, CVP_CC_MVS0C_CBCR);
+	if (reg & 0x80000000)
+		return -2;
+
+	return 0;
+}
+
+static int __check_core_power_on_v1(struct iris_hfi_device *device)
+{
+	u32 reg;
+
+	reg = __read_register(device, CVP_CC_MVS0_GDSCR);
+	if (!(reg & 0x80000000))
+		return -1;
+
+	reg = __read_register(device, CVP_CC_MVS0_CBCR);
+	if (reg & 0x80000000)
+		return -2;
+
+	return 0;
+}
+
+static int __power_on_controller_v1(struct iris_hfi_device *device)
+{
+	int rc = 0;
+	CVPKERNEL_ATRACE_BEGIN("__power_on_controller_v1");
+
+	rc = __enable_regulator(device, "cvp");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to enable ctrler: %d\n", rc);
+		return rc;
+	}
+
+	rc = msm_cvp_prepare_enable_clk(device, "sleep_clk");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to enable sleep clk: %d\n", rc);
+		goto fail_reset_sleep;
+	}
+	/***************************** TODO: **********************************
+	After adding AXI0C and FREERUN resets in DTSI, changing below code
+	rc = call_iris_op(device, reset_control_assert_name, device, "cvp_axi_reset");
+	if (rc)
+		dprintk(CVP_ERR, "%s: assert cvp_axi_reset failed\n", __func__);
+
+	rc = call_iris_op(device, reset_control_assert_name, device, "cvp_core_reset");
+	if (rc)
+		dprintk(CVP_ERR, "%s: assert cvp_core_reset failed\n", __func__);
+
+	usleep_range(300, 400);
+
+	rc = call_iris_op(device, reset_control_deassert_name, device, "cvp_axi_reset");
+	if (rc)
+		dprintk(CVP_ERR, "%s: de-assert cvp_axi_reset failed\n", __func__);
+	rc = call_iris_op(device, reset_control_deassert_name, device, "cvp_core_reset");
+	if (rc)
+		dprintk(CVP_ERR, "%s: de-assert cvp_core_reset failed\n", __func__);
+
+	****************************************************************************/
+	rc = msm_cvp_prepare_enable_clk(device, "core_axi_clock");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to enable axi0 clk: %d\n", rc);
+		goto fail_enable_axi0;
+	}
+
+	rc = msm_cvp_prepare_enable_clk(device, "cvp_axi_clock");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to enable axi0c clk: %d\n", rc);
+		goto fail_enable_axi0c;
+	}
+
+	rc = msm_cvp_prepare_enable_clk(device, "cvp_clk");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to enable cvp_clk: %d\n", rc);
+		goto fail_enable_cvp;
+	}
+
+	rc = msm_cvp_prepare_enable_clk(device, "cvp_freerun_clk");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to enable cvp_freerun_clk: %d\n", rc);
+		goto fail_enable_freerun;
+	}
+
+	dprintk(CVP_PWR, "EVA controller powered on\n");
+	return 0;
+
+fail_enable_freerun:
+	msm_cvp_disable_unprepare_clk(device, "cvp");
+fail_enable_cvp:
+	msm_cvp_disable_unprepare_clk(device, "cvp_axi_clock");
+fail_enable_axi0c:
+	msm_cvp_disable_unprepare_clk(device, "core_axi_clock");
+fail_enable_axi0:
+	msm_cvp_disable_unprepare_clk(device, "sleep_clk");
+fail_reset_sleep:
+	__disable_regulator(device, "cvp");
+	CVPKERNEL_ATRACE_END("__power_on_controller_v1");
+	return rc;
+}
+
+static int __power_on_core_v1(struct iris_hfi_device *device)
+{
+	int rc = 0;
+	CVPKERNEL_ATRACE_BEGIN("__power_on_core_v1");
+
+	rc = __enable_regulator(device, "cvp-core");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to enable core: %d\n", rc);
+		return rc;
+	}
+
+	rc = msm_cvp_prepare_enable_clk(device, "eva_cc_mvs0_clk_src");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to enable eva_cc_mvs0_clk_src:%d\n",
+			rc);
+		goto fail_enable_clk_src;
+	}
+
+	rc = msm_cvp_prepare_enable_clk(device, "core_clk");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to enable core_clk: %d\n", rc);
+		goto fail_enable_core;
+	}
+
+	rc = msm_cvp_prepare_enable_clk(device, "core_freerun_clk");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to enable core_freerun_clk: %d\n", rc);
+		goto fail_enable_freerun;
+	}
+
+	dprintk(CVP_PWR, "EVA core powered on\n");
+	CVPKERNEL_ATRACE_END("__power_on_core_v1");
+
+	return 0;
+
+fail_enable_freerun:
+	msm_cvp_disable_unprepare_clk(device, "core_clk");
+fail_enable_core:
+	msm_cvp_disable_unprepare_clk(device, "eva_cc_mvs0_clk_src");
+fail_enable_clk_src:
+	__disable_regulator(device, "cvp-core");
+	return rc;
+}
+
+static int __power_off_core_v1(struct iris_hfi_device *device)
+{
+	u32 config, value = 0, count = 0;
+	u32 max_count = 10;
+
+	value = __read_register(device, CVP_CC_MVS0_GDSCR);
+	if (!(value & 0x80000000)) {
+		/*
+		 * Core has been powered off by f/w.
+		 * Check NOC reset registers to ensure
+		 * NO outstanding NoC transactions
+		 */
+		value = __read_register(device, CVP_NOC_RESET_ACK);
+		if (value) {
+			dprintk(CVP_WARN,
+				"Core off with NOC RESET ACK non-zero %x\n",
+				value);
+			call_iris_op(device, print_sbm_regs, device);
+		}
+		__disable_regulator(device, "cvp-core");
+		msm_cvp_disable_unprepare_clk(device, "core_clk");
+		return 0;
+	} else if (!(value & 0x2) && msm_cvp_fw_low_power_mode) {
+		/*
+		 * HW_CONTROL PC disabled, then core is powered on for
+		 * CVP NoC access
+		 */
+		__disable_regulator(device, "cvp-core");
+                msm_cvp_disable_unprepare_clk(device, "core_clk");
+                return 0;
+	}
+
+	dprintk(CVP_PWR, "Driver controls Core power off now\n");
+
+	/* HPG 3.4.4 step 1 */
+	/*
+	 * check to make sure core clock branch enabled else
+	 * we cannot read core idle register
+	 */
+	config = __read_register(device, CVP_WRAPPER_CORE_CLOCK_CONFIG);
+	if (config) {
+		dprintk(CVP_PWR,
+		"core clock config not enabled, enable it to access core\n");
+		__write_register(device, CVP_WRAPPER_CORE_CLOCK_CONFIG, 0);
+	}
+
+	/*
+	 * add MNoC idle check before collapsing MVS1 per HPG update
+	 * poll for NoC DMA idle -> HPG 6.2.1
+	 *
+	 */
+	do {
+		value = __read_register(device, CVP_SS_IDLE_STATUS);
+		if (value & 0x400000)
+			break;
+		else
+			usleep_range(1000, 2000);
+		count++;
+	} while (count < max_count);
+
+	if (count == max_count) {
+		dprintk(CVP_WARN, "Core fail to go idle %x\n", value);
+	}
+
+	/* New addition to put CORE NOC to low power Section 6.14 (Steps 4-6)*/
+	__enter_core_noc_lpi(device);
+
+	/* HPG 3.4.4 step 5 */
+	/* Reset both sides of 2 ahb2ahb_bridges (TZ and non-TZ) */
+	__write_register(device, CVP_AHB_BRIDGE_SYNC_RESET, 0x3);
+
+	__write_register(device, CVP_WRAPPER_CORE_CLOCK_CONFIG, config);
+
+	/* HPG 3.4.4 step 6-7 */
+	__disable_hw_power_collapse(device);
+	usleep_range(100, 200);
+	__disable_regulator(device, "cvp-core");
+	msm_cvp_disable_unprepare_clk(device, "core_clk");
+	return 0;
+}
+
+
+static int __power_off_controller_v1(struct iris_hfi_device *device)
+{
+	u32 lpi_status, count = 0, max_count = 1000;
+	int rc;
+
+	/* HPG 3.7 Step 4  */
+	__write_register(device, CVP_CPU_CS_X2RPMh, 0x3);
+
+	/* New addition to put CPU/Tensilica NOC to low power Section 6.14 (Steps 15-17)*/
+	__enter_cpu_noc_lpi(device);
+
+	/* New addition to put CVP_VIDEO_CTL NOC to low power Section 6.14 (Steps 19-21)*/
+	__enter_video_ctl_noc_lpi(device);
+
+	/* HPG 3.7 step 11 */
+	__write_register(device, CVP_WRAPPER_DEBUG_BRIDGE_LPI_CONTROL, 0x0);
+
+	/* HPG 3.7 step 12 */
+	lpi_status = 0x1;
+	count = 0;
+	while (lpi_status && count < max_count) {
+		lpi_status = __read_register(device,
+				 CVP_WRAPPER_DEBUG_BRIDGE_LPI_STATUS);
+		usleep_range(50, 100);
+		count++;
+	}
+	dprintk(CVP_PWR,
+		"DBLP Release: lpi_status %d(count %d)\n",
+		lpi_status, count);
+	if (count == max_count) {
+		dprintk(CVP_WARN, "DBLP Release: lpi_status %x\n", lpi_status);
+	}
+
+	/*
+	 * Below sequence are missing from HPG Section 3.7.
+	 * It disables EVA_CC clks in power on sequence
+	 */
+	rc = msm_cvp_disable_unprepare_clk(device, "core_freerun_clk");
+	if (rc)
+		dprintk(CVP_ERR, "Failed to disable core_freerun_clk: %d\n", rc);
+
+	rc = msm_cvp_disable_unprepare_clk(device, "cvp_freerun_clk");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to disable cvp_freerun_clk: %d\n", rc);
+	}
+	rc = msm_cvp_disable_unprepare_clk(device, "cvp_clk");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to disable cvp_clk: %d\n", rc);
+	}
+	rc = msm_cvp_disable_unprepare_clk(device, "sleep_clk");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to disable sleep clk: %d\n", rc);
+	}
+
+	/* HPG 3.7 Step 13 and 14 */
+	__disable_regulator(device, "cvp");
+
+	/* Step #28: Override ARCG control to allow AXI0 clock pass through */
+	__write_register(device, CVP_AON_WRAPPER_CVP_NOC_ARCG_CONTROL, 0x1);
+
+	/* Below sequence are missing from HPG Section 3.7.
+	 * It disables GCC clks in power on sequence
+	 */
+	rc = msm_cvp_disable_unprepare_clk(device, "core_axi_clock");
+	rc = msm_cvp_disable_unprepare_clk(device, "cvp_axi_clock");
+
+
+	/****************** TODO RESET ****************************************
+	 * Section 3.8.1
+	 *
+	 *
+	rc = call_iris_op(device, reset_control_assert_name, device, "cvp_axi_reset");
+	if (rc)
+		dprintk(CVP_ERR, "%s: assert cvp_axi_reset failed\n", __func__);
+
+	rc = call_iris_op(device, reset_control_assert_name, device, "cvp_core_reset");
+	if (rc)
+		dprintk(CVP_ERR, "%s: assert cvp_core_reset failed\n", __func__);
+	usleep_range(1000, 1050);
+
+	rc = call_iris_op(device, reset_control_deassert_name, device, "cvp_axi_reset");
+	if (rc)
+		dprintk(CVP_ERR, "%s: de-assert cvp_axi_reset failed\n", __func__);
+
+	rc = call_iris_op(device, reset_control_deassert_name, device, "cvp_core_reset");
+	if (rc)
+		dprintk(CVP_ERR, "%s: de-assert cvp_core_reset failed\n", __func__);
+
+	***********************************************************************/
+	rc = msm_cvp_disable_unprepare_clk(device, "eva_cc_mvs0_clk_src");
+	if (rc) {
+		dprintk(CVP_ERR, "Failed to disable eva_cc_mvs0_clk_src: %d\n", rc);
+	}
+	return 0;
+}
+
+static void __print_sidebandmanager_regs_v1(struct iris_hfi_device *device)
+{
+	u32 sbm_ln0_low, axi_cbcr, val;
+	u32 main_sbm_ln0_low = 0xdeadbeef, main_sbm_ln0_high = 0xdeadbeef;
+	u32 main_sbm_ln1_high = 0xdeadbeef, cpu_cs_x2rpmh;
+
+	sbm_ln0_low =
+		__read_register(device, CVP_NOC_SBM_SENSELN0_LOW);
+
+	cpu_cs_x2rpmh = __read_register(device, CVP_CPU_CS_X2RPMh);
+
+	__write_register(device, CVP_CPU_CS_X2RPMh,
+			(cpu_cs_x2rpmh | CVP_CPU_CS_X2RPMh_SWOVERRIDE_BMSK));
+	usleep_range(500, 1000);
+	val = __read_register(device, CVP_CPU_CS_X2RPMh);
+	dprintk(CVP_REG, "CVP_CPU_CS_X2RPMh %#x\n", val);
+	val = __read_register(device, CVP_CPU_CS_X2RPMh_STATUS);
+	dprintk(CVP_REG, "CVP_CPU_CS_X2RPMh_STATUS %#x\n", val);
+
+	cpu_cs_x2rpmh = __read_register(device, CVP_CPU_CS_X2RPMh);
+	if (!(cpu_cs_x2rpmh & CVP_CPU_CS_X2RPMh_SWOVERRIDE_BMSK)) {
+		dprintk(CVP_WARN,
+			"failed set CVP_CPU_CS_X2RPMH mask %x\n",
+			cpu_cs_x2rpmh);
+		goto exit;
+	}
+
+	axi_cbcr = __read_gcc_register(device, CVP_GCC_EVA_AXI0_CBCR);
+	if (axi_cbcr & 0x80000000) {
+		dprintk(CVP_WARN, "failed to turn on AXI clock %x\n",
+			axi_cbcr);
+		goto exit;
+	}
+
+	/* Added by Thomas to debug CPU NoC hang */
+	val = __read_register(device, CVP_NOC_ERR_ERRVLD_LOW_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC_ERL_MAIN_ERRVLD_LOW %#x\n", val);
+
+	val = __read_register(device, CVP_NOC_SBM_FAULTINSTATUS0_LOW);
+	dprintk(CVP_ERR, "CVP_NOC_SBM_FAULTINSTATUS0_LOW %#x\n", val);
+
+	val = __read_register(device, CVP_NOC_ERR_ERRLOG0_LOW_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC_ERL_MAIN_ERRLOG0_LOW %#x\n", val);
+
+	val = __read_register(device, CVP_NOC_ERR_ERRLOG0_HIGH_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC_ERL_MAIN_ERRLOG0_HIGH %#x\n", val);
+
+	val = __read_register(device, CVP_NOC_ERR_ERRLOG1_LOW_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC_ERL_MAIN_ERRLOG1_LOW %#x\n", val);
+
+	val = __read_register(device, CVP_NOC_ERR_ERRLOG1_HIGH_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC_ERL_MAIN_ERRLOG1_HIGH %#x\n", val);
+
+	val = __read_register(device, CVP_NOC_ERR_ERRLOG2_LOW_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC_ERL_MAIN_ERRLOG2_LOW %#x\n", val);
+
+	val = __read_register(device, CVP_NOC_ERR_ERRLOG2_HIGH_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC_ERL_MAIN_ERRLOG2_HIGH %#x\n", val);
+
+	val = __read_register(device, CVP_NOC_ERR_ERRLOG3_LOW_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC_ERL_MAIN_ERRLOG3_LOW %#x\n", val);
+
+	val = __read_register(device, CVP_NOC_ERR_ERRLOG3_HIGH_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC_ERL_MAIN_ERRLOG3_HIGH %#x\n", val);
+
+
+	main_sbm_ln0_low = __read_register(device,
+			CVP_NOC_MAIN_SIDEBANDMANAGER_SENSELN0_LOW);
+	main_sbm_ln0_high = __read_register(device,
+			CVP_NOC_MAIN_SIDEBANDMANAGER_SENSELN0_HIGH);
+	main_sbm_ln1_high = __read_register(device,
+			CVP_NOC_MAIN_SIDEBANDMANAGER_SENSELN1_HIGH);
+
+exit:
+	cpu_cs_x2rpmh = cpu_cs_x2rpmh & (~CVP_CPU_CS_X2RPMh_SWOVERRIDE_BMSK);
+	__write_register(device, CVP_CPU_CS_X2RPMh, cpu_cs_x2rpmh);
+	dprintk(CVP_WARN, "Sidebandmanager regs %x %x %x %x %x\n",
+		sbm_ln0_low, main_sbm_ln0_low,
+		main_sbm_ln0_high, main_sbm_ln1_high,
+		cpu_cs_x2rpmh);
+}
+
+static int __enable_hw_power_collapse_v1(struct iris_hfi_device *device)
+{
+	int rc = 0, loop = 10;
+	u32 reg_gdsc;
+
+	if (!msm_cvp_fw_low_power_mode) {
+		dprintk(CVP_PWR, "Not enabling hardware power collapse\n");
+		return 0;
+	}
+
+	rc = __hand_off_regulators(device);
+	if (rc) {
+		dprintk(CVP_WARN,
+			"%s : Failed to enable HW power collapse %d\n",
+				__func__, rc);
+		return rc;
+	}
+
+	while (loop) {
+		reg_gdsc = __read_register(device, CVP_CC_MVS0_GDSCR);
+		if (reg_gdsc & 0x80000000) {
+			usleep_range(100, 200);
+			loop--;
+		} else {
+			break;
+		}
+	}
+
+	if (!loop) {
+		dprintk(CVP_ERR, "fail to power off CORE during resume\n");
+		return -EINVAL;
+	}
+
+	return rc;
+}
+
+static int __set_registers_v1(struct iris_hfi_device *device)
+{
+	struct msm_cvp_core *core;
+	struct msm_cvp_platform_data *pdata;
+	struct reg_set *reg_set;
+	int i;
+	u32 val;
+
+	if (!device->res) {
+		dprintk(CVP_ERR,
+			"device resources null, cannot set registers\n");
+		return -EINVAL ;
+	}
+
+	core = cvp_driver->cvp_core;
+	pdata = core->platform_data;
+
+	reg_set = &device->res->reg_set;
+	for (i = 0; i < reg_set->count; i++) {
+		__write_register(device, reg_set->reg_tbl[i].reg,
+				reg_set->reg_tbl[i].value);
+		dprintk(CVP_REG, "write_reg offset=%x, val=%x\n",
+					reg_set->reg_tbl[i].reg,
+					reg_set->reg_tbl[i].value);
+	}
+
+	/* Reset both sides of 2 ahb2ahb_bridges (TZ and non-TZ)
+	 * As suggested by DV team
+	 */
+	__write_register(device, CVP_AHB_BRIDGE_SYNC_RESET, 0x2);
+	__write_register(device, CVP_AHB_BRIDGE_SYNC_RESET, 0x0);
+
+	val = __read_register(device, CVP_VIDEO_B_NOC_A_QOSGEN_MAINCTL_LOW);
+	__write_register(device, CVP_VIDEO_B_NOC_A_QOSGEN_MAINCTL_LOW, val & ~BIT(2));
+	val = __read_register(device, CVP_VIDEO_B_NOC_B_QOSGEN_MAINCTL_LOW);
+	__write_register(device, CVP_VIDEO_B_NOC_B_QOSGEN_MAINCTL_LOW, val & ~BIT(2));
+	val = __read_register(device, CVP_VIDEO_B_NOC_C_QOSGEN_MAINCTL_LOW);
+	__write_register(device, CVP_VIDEO_B_NOC_C_QOSGEN_MAINCTL_LOW, val & ~BIT(2));
+
+	__write_register(device, CVP_NOC_RCGCONTROLLER_HYSTERESIS_LOW, 0xff);
+	__write_register(device, CVP_NOC_RCGCONTROLLER_WAKEUP_LOW, 0x7);
+	__write_register(device, CVP_NOC_RCG_VNOC_NOC_CLK_FORCECLOCKON_LOW, 0x1);
+	__write_register(device,
+		CVP_NOC_RCG_VNOC_NOC_CLK_ENABLE_LOW + device->res->rcg_vnoc_clk_en_low, 0x1);
+	usleep_range(5, 10);
+	__write_register(device, CVP_NOC_RCG_VNOC_NOC_CLK_FORCECLOCKON_LOW, 0x0);
+	__write_register(device, CVP_AON_WRAPPER_CVP_NOC_ARCG_CONTROL, 0x0);
+
+	__write_register(device, CVP_CPU_CS_AXI4_QOS,
+				pdata->noc_qos->axi_qos);
+	__write_register(device, CVP_NOC_A_PRIORITYLUT_LOW,
+				pdata->noc_qos->prioritylut_low);
+	__write_register(device, CVP_NOC_A_PRIORITYLUT_HIGH,
+				pdata->noc_qos->prioritylut_high);
+	__write_register(device, CVP_NOC_A_URGENCY_LOW,
+				pdata->noc_qos->urgency_low);
+	__write_register(device, CVP_NOC_A_DANGERLUT_LOW,
+				pdata->noc_qos->dangerlut_low);
+	__write_register(device, CVP_NOC_A_SAFELUT_LOW,
+				pdata->noc_qos->safelut_low);
+	__write_register(device, CVP_NOC_B_PRIORITYLUT_LOW,
+				pdata->noc_qos->prioritylut_low);
+	__write_register(device, CVP_NOC_B_PRIORITYLUT_HIGH,
+				pdata->noc_qos->prioritylut_high);
+	__write_register(device, CVP_NOC_B_URGENCY_LOW,
+				pdata->noc_qos->urgency_low);
+	__write_register(device, CVP_NOC_B_DANGERLUT_LOW,
+				pdata->noc_qos->dangerlut_low);
+	__write_register(device, CVP_NOC_B_SAFELUT_LOW,
+				pdata->noc_qos->safelut_low);
+	__write_register(device, CVP_NOC_C_PRIORITYLUT_LOW,
+				pdata->noc_qos->prioritylut_low);
+	__write_register(device, CVP_NOC_C_PRIORITYLUT_HIGH,
+				pdata->noc_qos->prioritylut_high);
+	__write_register(device, CVP_NOC_C_URGENCY_LOW,
+				pdata->noc_qos->urgency_low_ro);
+	__write_register(device, CVP_NOC_C_DANGERLUT_LOW,
+				pdata->noc_qos->dangerlut_low);
+	__write_register(device, CVP_NOC_C_SAFELUT_LOW,
+				pdata->noc_qos->safelut_low);
+
+	/* Below registers write moved from FW to SW to enable UBWC */
+	__write_register(device, CVP_NOC_A_NIU_DECCTL_LOW, 0x1);
+	__write_register(device, CVP_NOC_A_NIU_ENCCTL_LOW, 0x1);
+	__write_register(device, CVP_NOC_B_NIU_DECCTL_LOW, 0x1);
+	__write_register(device, CVP_NOC_B_NIU_ENCCTL_LOW, 0x1);
+	__write_register(device, CVP_NOC_CORE_ERR_MAINCTL_LOW_OFFS, 0x3);
+	__write_register(device, CVP_NOC_MAIN_SIDEBANDMANAGER_FAULTINEN0_LOW, 0x1);
+
+	return 0;
+}
+
+static void __dump_noc_regs_v1(struct iris_hfi_device *device)
+{
+	u32 val = 0, config;
+	struct regulator_info *rinfo;
+	int rc = 0;
+
+	if (msm_cvp_fw_low_power_mode) {
+		iris_hfi_for_each_regulator(device, rinfo) {
+			if (strcmp(rinfo->name, "cvp-core"))
+				continue;
+			rc = __acquire_regulator(rinfo, device);
+			if (rc)
+				dprintk(CVP_WARN,
+						"%s, Failed to acquire regulator control: %s\n",
+						__func__, rinfo->name);
+		}
+	}
+	val = __read_register(device, CVP_CC_MVS0_GDSCR);
+	dprintk(CVP_ERR, "%s, CVP_CC_MVS0_GDSCR: 0x%x", __func__, val);
+	config = __read_register(device, CVP_WRAPPER_CORE_CLOCK_CONFIG);
+	dprintk(CVP_ERR, "%s, CVP_WRAPPER_CORE_CLOCK_CONFIG: 0x%x", __func__, config);
+	if (config) {
+		dprintk(CVP_PWR,
+				"core clock config not enabled, enable it to access core\n");
+		__write_register(device, CVP_WRAPPER_CORE_CLOCK_CONFIG, 0);
+	}
+
+	val = __read_register(device, CVP_NOC_A_NIU_DECCTL_LOW);
+	dprintk(CVP_ERR, "CVP_NOC_A_NIU_DECCTL_LOW: 0x%x", val);
+	val = __read_register(device, CVP_NOC_A_NIU_ENCCTL_LOW);
+	dprintk(CVP_ERR, "CVP_NOC_A_NIU_ENCCTL_LOW: 0x%x", val);
+	val = __read_register(device, CVP_NOC_B_NIU_DECCTL_LOW);
+	dprintk(CVP_ERR, "CVP_NOC_B_NIU_DECCTL_LOW: 0x%x", val);
+	val = __read_register(device, CVP_NOC_B_NIU_ENCCTL_LOW);
+	dprintk(CVP_ERR, "CVP_NOC_B_NIU_ENCCTL_LOW: 0x%x", val);
+	val = __read_register(device, CVP_NOC_MAIN_SIDEBANDMANAGER_FAULTINEN0_LOW);
+	dprintk(CVP_ERR, "CVP_NOC_MAIN_SIDEBANDMANAGER_FAULTINEN0_LOW: 0x%x", val);
+	val = __read_register(device, CVP_NOC_MAIN_SIDEBANDMANAGER_SENSELN0_LOW);
+	dprintk(CVP_ERR, "CVP_NOC_MAIN_SIDEBANDMANAGER_SENSELN0_LOW: 0x%x", val);
+	val = __read_register(device, CVP_NOC_MAIN_SIDEBANDMANAGER_SENSELN0_HIGH);
+	dprintk(CVP_ERR, "CVP_NOC_MAIN_SIDEBANDMANAGER_SENSELN0_HIGH: 0x%x", val);
+	val = __read_register(device, CVP_NOC_MAIN_SIDEBANDMANAGER_SENSELN1_HIGH);
+	dprintk(CVP_ERR, "CVP_NOC_MAIN_SIDEBANDMANAGER_SENSELN1_HIGH: 0x%x", val);
+
+	dprintk(CVP_ERR, "Dumping Core NoC registers\n");
+	val = __read_register(device, CVP_NOC_CORE_ERR_SWID_LOW_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC__CORE_ERL_MAIN_SWID_LOW: 0x%x", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_SWID_HIGH_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC_CORE_ERL_MAIN_SWID_HIGH 0x%x", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_MAINCTL_LOW_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC_CORE_ERL_MAIN_MAINCTL_LOW 0x%x", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRVLD_LOW_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC_CORE_ERL_MAIN_ERRVLD_LOW 0x%x", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRCLR_LOW_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC_CORE_ERL_MAIN_ERRCLR_LOW 0x%x", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRLOG0_LOW_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC_CORE_ERL_MAIN_ERRLOG0_LOW 0x%x", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRLOG0_HIGH_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC_CORE_ERL_MAIN_ERRLOG0_HIGH 0x%x", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRLOG1_LOW_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC_CORE_ERL_MAIN_ERRLOG1_LOW 0x%x", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRLOG1_HIGH_OFFS);
+	__print_reg_details_errlog1_high(val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRLOG2_LOW_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC_CORE_ERL_MAIN_ERRLOG2_LOW 0x%x", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRLOG2_HIGH_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC_CORE_ERL_MAIN_ERRLOG2_HIGH 0x%x", val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRLOG3_LOW_OFFS);
+	dprintk(CVP_ERR, "CORE ERRLOG3_LOW 0x%x, below details", val);
+	__print_reg_details_errlog3_low(val);
+	val = __read_register(device, CVP_NOC_CORE_ERR_ERRLOG3_HIGH_OFFS);
+	dprintk(CVP_ERR, "CVP_NOC_CORE_ERL_MAIN_ERRLOG3_HIGH 0x%x", val);
+	__write_register(device, CVP_NOC_CORE_ERR_ERRCLR_LOW_OFFS, 0x1);
+
+	if (msm_cvp_fw_low_power_mode) {
+		iris_hfi_for_each_regulator(device, rinfo) {
+			if (strcmp(rinfo->name, "cvp-core"))
+				continue;
+			rc = __hand_off_regulator(rinfo);
+		}
+	}
+	__write_register(device, CVP_WRAPPER_CORE_CLOCK_CONFIG, config);
+}
+
+#endif	/* End of CONFIG_EVA_PINEAPPLE */
 
 static void iris_init_hfi_callbacks(struct cvp_hfi_ops *ops_tbl)
 {
@@ -5576,7 +6555,7 @@ static void iris_init_hfi_callbacks(struct cvp_hfi_ops *ops_tbl)
 	ops_tbl->flush_debug_queue = iris_hfi_flush_debug_queue;
 	ops_tbl->noc_error_info = iris_hfi_noc_error_info;
 	ops_tbl->validate_session = iris_hfi_validate_session;
-	ops_tbl->pm_qos_update = iris_pm_qos_aggregate;
+	ops_tbl->pm_qos_update = iris_pm_qos_update;
 	ops_tbl->debug_hook = iris_debug_hook;
 }
 
@@ -5638,74 +6617,6 @@ void cvp_clock_reg_print(struct iris_hfi_device *dev)
 	dprintk(CVP_ERR, "CVP_GCC_EVA_AHB_CBCR: %x\n", reg);
 	reg = __read_gcc_register(dev, CVP_GCC_EVA_XO_CBCR);
 	dprintk(CVP_ERR, "CVP_GCC_EVA_XO_CBCR: %x\n", reg);
-}
-
-static bool msm_cvp_validate_fw_version(char version)
-{
-	bool is_numeric = true;
-	const int char_of_0 = 48, char_of_9 = 57;
-
-	if (((int)version < char_of_0) || ((int)version > char_of_9)) {
-		is_numeric = false;
-		dprintk(CVP_WARN, "%s:non-numeric char %x\n", __func__, version);
-	}
-
-	return is_numeric;
-}
-
-u32 msm_cvp_set_fw_version(char *image_version)
-{
-	u32 fw_version = 0;
-	u8 major_version, minor_version, rev_version_1, rev_version_2;
-	u32 rev_version_merged = 0;
-	u8 char_correction = 48;
-	char fw_string[] = "EVA.FIRMWARE.";
-	char version_subarray[10];
-	size_t copy_bytes = 6;
-	size_t fw_string_size = ARRAY_SIZE(fw_string) - 1;
-
-	char *vptr = strnstr(image_version, fw_string, 128);
-
-	if (vptr == NULL) {
-		dprintk(CVP_WARN, "%s: EVA.FIRMWARE not found in sys props\n", __func__);
-		goto error_fw_version;
-	}
-
-	vptr = vptr + fw_string_size;
-
-	memcpy(version_subarray, vptr, copy_bytes);
-
-	if (!msm_cvp_validate_fw_version(version_subarray[0]))
-		goto error_fw_version;
-
-	major_version = (u8)version_subarray[0] - char_correction;
-
-	if (!msm_cvp_validate_fw_version(version_subarray[2]))
-		goto error_fw_version;
-
-	minor_version = (u8)version_subarray[2] - char_correction;
-
-	if (!msm_cvp_validate_fw_version(version_subarray[4]))
-		goto error_fw_version;
-
-	rev_version_1 = (u8)version_subarray[4] - char_correction;
-
-	if (!msm_cvp_validate_fw_version(version_subarray[5])) {
-		rev_version_merged = rev_version_1;
-	} else {
-		rev_version_2 = (u8)version_subarray[5] - char_correction;
-		rev_version_merged = (rev_version_1 * 10) + rev_version_2;
-	}
-
-	fw_version = (((u32)major_version << 24) |
-	((u32)minor_version << 16) | rev_version_merged);
-
-	dprintk(CVP_CORE, "%s: fw version set:0x%x\n", __func__, fw_version);
-	return fw_version;
-
-error_fw_version:
-	dprintk(CVP_WARN, "%s: Failed to set fw version\n", __func__);
-	return fw_version;
 }
 
 

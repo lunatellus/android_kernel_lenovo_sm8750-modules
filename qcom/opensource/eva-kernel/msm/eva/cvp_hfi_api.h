@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.​
+ * Copyright (c) 2023-2024, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #ifndef __CVP_HFI_API_H__
@@ -14,7 +14,7 @@
 #include <linux/hash.h>
 #include "msm_cvp_core.h"
 #include "msm_cvp_resources.h"
-#include "cvp_hfi.h"
+#include "cvp_hfi_helper.h"
 
 #define CONTAINS(__a, __sz, __t) (\
 	(__t >= __a) && \
@@ -240,15 +240,8 @@ struct cvp_hal_cmd_sys_get_property_packet {
 #define call_hfi_op(q, op, args...)			\
 	(((q) && (q)->op) ? ((q)->op(args)) : 0)
 
-#define PKT_NAME_LEN	64
+#define PKT_NAME_LEN	24
 #define MAX_PKT_IDX	0x200
-
-#define CTRL_OFFSET 0x32
-#define CONFIG_OFFSET 0x64
-#define FRAME_OFFSET 0x96
-
-#define MSG_SESSION_EVA_CTRL_INDEX 0x32
-#define MSG_SESSION_INDEX 0x64
 
 struct msm_cvp_hfi_defs {
 	unsigned int size;
@@ -315,21 +308,14 @@ void cvp_hfi_deinitialize(enum msm_cvp_hfi_type hfi_type,
 			struct cvp_hfi_ops *hdev);
 
 int get_pkt_index(struct cvp_hal_session_cmd_pkt *hdr);
-int get_pkt_fenceoverride(struct cvp_hal_session_cmd_pkt *hdr);
+int get_pkt_fenceoverride(struct cvp_hal_session_cmd_pkt* hdr);
 int get_pkt_index_from_type(u32 pkt_type);
-const char *get_pkt_name_from_type(u32 pkt_type);
-const char *get_feature_name_from_type(u32 pkt_type);
 int get_hfi_version(void);
 unsigned int get_msg_size(struct cvp_hfi_msg_session_hdr *hdr);
 unsigned int get_msg_session_id(void *msg);
 unsigned int get_msg_errorcode(void *msg);
 int get_msg_opconfigs(void *msg, unsigned int *session_id,
 		unsigned int *error_type, unsigned int *config_id);
-extern struct msm_cvp_hfi_defs *cvp_hfi_defs;
-extern struct msm_cvp_hfi_defs cvp_hfi_defs_v1[MAX_PKT_IDX];
-extern struct msm_cvp_hfi_defs *cvp_hfi_msg_defs;
-extern struct msm_cvp_hfi_defs cvp_hfi_msg_defs_v1[MAX_PKT_IDX];
-extern struct msm_cvp_hfi_defs cvp_hfi_defs_v2[MAX_PKT_IDX];
-extern struct msm_cvp_hfi_defs cvp_hfi_msg_defs_v2[MAX_PKT_IDX];
+extern const struct msm_cvp_hfi_defs cvp_hfi_defs[MAX_PKT_IDX];
 void print_hfi_queue_info(struct cvp_hfi_ops *hdev);
 #endif /*__CVP_HFI_API_H__ */

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include "msm_cvp_common.h"
@@ -50,11 +50,11 @@ static void cvp_dump_fence_queue_v2(struct msm_cvp_inst *inst)
 	ssid = inst->synx_session_id;
 	mutex_lock(&q->lock);
 	dprintk(CVP_WARN, "inst %x fence q mode %d, ssid %pK\n",
-			inst->sess_id, q->mode, ssid);
+			hash32_ptr(inst->session), q->mode, ssid);
 
 	dprintk(CVP_WARN, "fence cmdq wait list:\n");
 	list_for_each_entry(f, &q->wait_list, list) {
-		dprintk(CVP_WARN, "frame pkt type 0x%x\n", f->pkt->header.packet_type);
+		dprintk(CVP_WARN, "frame pkt type 0x%x\n", f->pkt->packet_type);
 		for (i = 0; i < f->output_index; i++)
 			dprintk(CVP_WARN, "idx %d client hdl %d, state %d\n",
 				i, f->synx[i],
@@ -64,7 +64,7 @@ static void cvp_dump_fence_queue_v2(struct msm_cvp_inst *inst)
 
 	dprintk(CVP_WARN, "fence cmdq schedule list:\n");
 	list_for_each_entry(f, &q->sched_list, list) {
-		dprintk(CVP_WARN, "frame pkt type 0x%x\n", f->pkt->header.packet_type);
+		dprintk(CVP_WARN, "frame pkt type 0x%x\n", f->pkt->packet_type);
 		for (i = 0; i < f->output_index; i++)
 			dprintk(CVP_WARN, "idx %d client hdl %d, state %d\n",
 				i, f->synx[i],
@@ -201,6 +201,8 @@ static int cvp_wait_synx(struct synx_session *ssid, u32 *synx, u32 num_synx,
 				if(*synx_state == SYNX_STATE_SIGNALED_SUCCESS)
 				{
 					dprintk(CVP_SYNX, "%s: SYNX SIGNAl STATE SUCCESS \n", __func__);
+					msm_cvp_cmd_tracing_from_sw(
+							fc->pkt, "EVA_KMD_SYNX_WAIT_SUCCESS");
 					rc=0;
 					i++;
 					continue;
@@ -225,10 +227,6 @@ static int cvp_wait_synx(struct synx_session *ssid, u32 *synx, u32 num_synx,
 		}
 		++i;
 	}
-	if (*synx_state == SYNX_STATE_SIGNALED_SUCCESS) {
-		msm_cvp_cmd_tracing_from_sw(
-				fc->pkt, "EVA_KMD_SYNX_WAIT_SUCCESS");
-	}
 	return rc;
 }
 
@@ -249,12 +247,10 @@ static int cvp_signal_synx(struct synx_session *ssid, u32 *synx, u32 num_synx,
 			}
 			dprintk(CVP_SYNX, "Signaled synx %u state %d\n",
 				h_synx, synx_state);
+			msm_cvp_msg_tracing_from_sw(
+					fc->msg_pkt, "EVA_KMD_SYNX_SIGNAL_SUCCESS");
 		}
 		++i;
-	}
-	if (synx_state == SYNX_STATE_SIGNALED_SUCCESS) {
-		msm_cvp_msg_tracing_from_sw(
-				fc->msg_pkt, "EVA_KMD_SYNX_SIGNAL_SUCCESS");
 	}
 	return rc;
 }

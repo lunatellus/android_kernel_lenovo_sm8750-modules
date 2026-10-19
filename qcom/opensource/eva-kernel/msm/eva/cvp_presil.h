@@ -45,6 +45,5 @@ void presil42_set_buf_fd(struct cvp_buf_type *buf, u32 iova, char *name);
 void presil42_set_buf_iova(struct cvp_hfi_cmd_session_set_buffers_packet *pkt, u32 iova);
 int  presil42_set_irq_settings(struct cvp_hal_data *hal, struct iris_hfi_device *device, int rc);
 void presil42_set_smem_flags(u32 smem_flags);
-void presil42_retrieve_sfr_buffer(struct iris_hfi_device *device);
 #endif
 #endif

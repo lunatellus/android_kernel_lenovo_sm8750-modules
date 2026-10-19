@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 
@@ -10,7 +10,6 @@
 #include "msm_cvp_internal.h"
 #include "cvp_core_hfi.h"
 
-int msm_cvp_set_fmax(struct msm_cvp_core *core);
 int msm_cvp_set_clocks(struct msm_cvp_core *core);
 int msm_cvp_mmrm_register(struct iris_hfi_device *device);
 int msm_cvp_mmrm_deregister(struct iris_hfi_device *device);

@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.​
+ * Copyright (c) 2023-2025 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
-#include <linux/atomic.h>
 #include <linux/debugfs.h>
 #include "msm_cvp_debug.h"
 #include "msm_cvp_common.h"
@@ -13,8 +12,6 @@
 #include "msm_cvp_dsp.h"
 
 #define MAX_SSR_STRING_LEN 10
-
-static atomic64_t cvp_debugfs_id = ATOMIC64_INIT(0);
 #ifdef USE_PRESIL
 int msm_cvp_debug = CVP_ERR | CVP_WARN | CVP_FW | CVP_DBG;
 #else
@@ -57,10 +54,6 @@ int cvp_kernel_fence_enabled = 2;
 int msm_cvp_hw_wd_recovery = 1;
 int msm_cvp_smmu_fault_recovery = 1;
 int msm_cvp_session_error_recovery = 1;
-int msm_cvp_hw_hang_recovery = 1;
-#ifdef CVP_SW_DBG_BUF_ENABLED
-int msm_cvp_sw_dbg_buf_dump = 1;
-#endif
 
 #define MAX_DBG_BUF_SIZE 4096
 
@@ -261,80 +254,6 @@ static int cvp_power_set(void *data, u64 val)
 }
 
 DEFINE_DEBUGFS_ATTRIBUTE(cvp_pwr_fops, cvp_power_get, cvp_power_set, "%llu\n");
-
-static int session_info_open(struct inode *inode, struct file *file)
-{
-	file->private_data = inode->i_private;
-	return 0;
-}
-
-static ssize_t session_info_read(struct file *file, char __user *buf,
-		size_t count, loff_t *ppos)
-{
-	struct msm_cvp_core *core = file->private_data;
-	struct msm_cvp_inst *inst = NULL;
-	struct msm_cvp_persist_list *list_node;
-
-	char *dbuf, *cur, *end;
-	ssize_t len = 0;
-	ssize_t debug_buf_len = 4096*4;
-
-	if (!core || !core->dev_ops) {
-		dprintk(CVP_ERR, "Invalid params, core: %pK\n", core);
-		return 0;
-	}
-
-	dbuf = kzalloc(debug_buf_len, GFP_KERNEL);
-	if (!dbuf) {
-		dprintk(CVP_ERR, "%s: Allocation failed!\n", __func__);
-		return -ENOMEM;
-	}
-	cur = dbuf;
-	end = cur + debug_buf_len;
-
-	mutex_lock(&core->lock);
-	list_for_each_entry(inst, &core->instances, list) {
-		cur += write_str(cur, end - cur, "==============================\n");
-		cur += write_str(cur, end - cur, "INSTANCE: %pK (%s)\n", inst,
-			inst->session_type == MSM_CVP_USER ? "User" : "Kernel");
-		cur += write_str(cur, end - cur, "proc name: %s\n", inst->proc_name);
-		cur += write_str(cur, end - cur, "session name: %s\n", inst->prop.session_name);
-		cur += write_str(cur, end - cur, "session id: %#x\n", inst->sess_id);
-		cur += write_str(cur, end - cur, "is secure: %u\n", inst->prop.is_secure);
-		cur += write_str(cur, end - cur, "priority: %u\n", inst->prop.priority);
-		cur += write_str(cur, end - cur, "qos latency: %u\n", inst->pm_qos_latency);
-		cur += write_str(cur, end - cur, "state: %d\n", inst->state);
-		cur += write_str(cur, end - cur, "total persist_usage %d bytes, frame_usage %d\n",
-					inst->persist_usage, inst->frame_usage);
-		list_for_each_entry(list_node, &inst->persist_list.list, list) {
-			cur += write_str(cur, end - cur, "%s size: %d bytes\n",
-				list_node->info.feature, list_node->info.persist_size);
-		}
-	}
-	mutex_unlock(&core->lock);
-
-	len = simple_read_from_buffer(buf, count, ppos,
-			dbuf, cur - dbuf);
-
-	dprintk(CVP_DBG, "%s: len %d\n", __func__, len);
-
-	if (len == 0) {
-		mutex_lock(&core->lock);
-		list_for_each_entry(inst, &core->instances, list) {
-			cvp_print_inst(CVP_ERR, inst);
-		}
-		mutex_unlock(&core->lock);
-	}
-
-	kfree(dbuf);
-	return len;
-}
-
-static const struct file_operations session_info_fops = {
-	.open = session_info_open,
-	.read = session_info_read,
-};
-
 
 struct dentry *msm_cvp_debugfs_init_drv(void)
 {
@@ -555,21 +474,8 @@ struct dentry *msm_cvp_debugfs_init_core(struct msm_cvp_core *core,
 		&msm_cvp_hw_wd_recovery);
 	debugfs_create_u32("smmu_fault_recovery", 0644, dir,
 		&msm_cvp_smmu_fault_recovery);
-
-#ifdef CVP_SW_DBG_BUF_ENABLED
-	debugfs_create_u32("sw_dbg_buf_dump", 0644, dir,
-		&msm_cvp_sw_dbg_buf_dump);
-#endif
-
-	debugfs_create_u32("session_error_recovery", 0644, dir,
-			&msm_cvp_session_error_recovery);
-	debugfs_create_u32("hw_hang_recovery", 0644, dir,
-			&msm_cvp_hw_hang_recovery);
-
-	if (!debugfs_create_file("session_info", 0444, dir, core, &session_info_fops)) {
-		dprintk(CVP_ERR, "debugfs_create_file: fail\n");
-		goto failed_create_dir;
-	}
+	debugfs_create_u32("trigger_crash", 0644, dir,
+		&msm_cvp_session_error_recovery);
 failed_create_dir:
 	return dir;
 }
@@ -688,8 +594,7 @@ struct dentry *msm_cvp_debugfs_init_inst(struct msm_cvp_inst *inst,
 		dprintk(CVP_ERR, "Invalid params, inst: %pK\n", inst);
 		goto exit;
 	}
-	snprintf(debugfs_name, MAX_DEBUGFS_NAME, "inst_%llu",
-		(unsigned long long)atomic64_inc_return(&cvp_debugfs_id));
+	snprintf(debugfs_name, MAX_DEBUGFS_NAME, "inst_%pK", inst);
 
 	idata = kzalloc(sizeof(*idata), GFP_KERNEL);
 	if (!idata) {

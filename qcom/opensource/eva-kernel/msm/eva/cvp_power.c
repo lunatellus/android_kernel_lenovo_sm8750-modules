@@ -1,7 +1,8 @@
+
 /* SPDX-License-Identifier: GPL-2.0-only
  *
+ * Copyright (c) 2022-2023, Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #include "msm_cvp.h"
@@ -101,10 +102,6 @@ static void aggregate_power_update(struct msm_cvp_core *core,
 		max_cycle[i] = find_max(&blocks_sum[i][0], HFI_MAX_HW_THREADS);
 		op_max_cycle[i] = find_max(&op_blocks_max[i][0], HFI_MAX_HW_THREADS);
 
-		/* Allow FW to overwrite max cycles as well */
-		max_cycle[i] = max_cycle[i] >= fw_sum[i] ? max_cycle[i] : fw_sum[i];
-		op_max_cycle[i] = op_max_cycle[i] >= op_fw_max[i] ? op_max_cycle[i] : op_fw_max[i];
-
 		op_max_cycle[i] =
 			(op_max_cycle[i] > max_clk_rate) ?
 			max_clk_rate : op_max_cycle[i];
@@ -159,14 +156,13 @@ static int adjust_bw_freqs(unsigned int max_bw, unsigned int min_bw)
 		nrt_pwr.core_sum, nrt_pwr.op_core_sum,
 		rt_pwr.core_sum, rt_pwr.op_core_sum);
 
-	core_sum = rt_pwr.core_sum + nrt_pwr.core_sum;
-
-	if (core_sum > cvp_max_rate) {
+	if (rt_pwr.core_sum > cvp_max_rate) {
 		dprintk(CVP_WARN, "%s clk vote out of range %lld\n",
-			__func__, core_sum);
+			__func__, rt_pwr.core_sum);
 		return -ENOTSUPP;
 	}
 
+	core_sum = rt_pwr.core_sum + nrt_pwr.core_sum;
 	op_core_sum = (rt_pwr.op_core_sum >= nrt_pwr.op_core_sum) ?
 		rt_pwr.op_core_sum : nrt_pwr.op_core_sum;
 
@@ -185,6 +181,7 @@ static int adjust_bw_freqs(unsigned int max_bw, unsigned int min_bw)
 	}
 
 	bw_sum = rt_pwr.bw_sum + nrt_pwr.bw_sum;
+	bw_sum = bw_sum >> 10;
 	bw_sum = (bw_sum > max_bw) ? max_bw : bw_sum;
 	bw_sum = (bw_sum < min_bw) ? min_bw : bw_sum;
 
@@ -217,17 +214,12 @@ int msm_cvp_update_power(struct msm_cvp_inst *inst)
 		return -EINVAL;
 	}
 
-	core = cvp_driver->cvp_core;
-	if (!core) {
-		dprintk(CVP_ERR, "%s: core is NULL", __func__);
-		return -EINVAL;
-	}
-
-	s = cvp_get_inst_validate(core, inst);
+	s = cvp_get_inst_validate(inst->core, inst);
 	if (!s)
 		return -ECONNRESET;
 
-	if (core->state == CVP_CORE_UNINIT) {
+	core = inst->core;
+	if (!core || core->state == CVP_CORE_UNINIT) {
 		rc = -ECONNRESET;
 		goto adjust_exit;
 	}
@@ -243,7 +235,7 @@ int msm_cvp_update_power(struct msm_cvp_inst *inst)
 		if (!strcmp(core->resources.bus_set.bus_tbl[bus_count].name, "eva-ddr")) {
 			bus = &core->resources.bus_set.bus_tbl[bus_count];
 			max_bw = bus->range[1];
-			min_bw = max_bw/100;
+			min_bw = max_bw/10;
 		}
 	}
 	if (!bus) {

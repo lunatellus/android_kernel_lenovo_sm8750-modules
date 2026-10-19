@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.​
+ * Copyright (c) 2023-2024, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/debugfs.h>
@@ -16,7 +16,6 @@
 #include <linux/types.h>
 #include <linux/version.h>
 #include <linux/io.h>
-#include <linux/vmalloc.h>
 #include "msm_cvp_core.h"
 #include "msm_cvp_common.h"
 #include "msm_cvp_debug.h"
@@ -30,9 +29,6 @@
 #include "msm_cvp_dsp.h"
 #include "msm_cvp.h"
 #include "vm/cvp_vm.h"
-#include "target/cvp_kaanapali_hal.h"
-#include "target/cvp_pakala_hal.h"
-#include "target/cvp_hawi_hal.h"
 
 #define CLASS_NAME              "cvp"
 #define DRIVER_NAME             "cvp"
@@ -133,8 +129,6 @@ static int msm_cvp_initialize_core(struct platform_device *pdev,
 	INIT_LIST_HEAD(&core->instances);
 	mutex_init(&core->lock);
 	mutex_init(&core->clk_lock);
-	mutex_init(&core->idr_lock);
-	idr_init(&core->sess_idr);
 
 	core->state = CVP_CORE_UNINIT;
 	for (i = SYS_MSG_INDEX(SYS_MSG_START);
@@ -283,7 +277,6 @@ static const struct of_device_id msm_cvp_plat_match[] = {
 	{.compatible = "qcom,msm-cvp,context-bank"},
 	{.compatible = "qcom,msm-cvp,bus"},
 	{.compatible = "qcom,msm-cvp,mem-cdsp"},
-	{.compatible = "qcom,msm-cvp,ipclite"},
 	{}
 };
 
@@ -298,11 +291,8 @@ static int msm_probe_cvp_device(struct platform_device *pdev)
 	}
 
 	core = kzalloc(sizeof(*core), GFP_KERNEL);
-	if (!core) {
-		dprintk(CVP_ERR, "Failed to allocate memory for core, size 0x%x\n",
-				sizeof(*core));
+	if (!core)
 		return -ENOMEM;
-	}
 
 	core->platform_data = cvp_get_drv_data(&pdev->dev);
 	dev_set_drvdata(&pdev->dev, core);
@@ -385,16 +375,6 @@ static int msm_probe_cvp_device(struct platform_device *pdev)
 
 	cvp_driver->sku_version = core->resources.sku_version;
 
-	core->kmd_trace.kmd_debug_log.log = vmalloc(sizeof(struct cvp_debug_log));
-	if (!core->kmd_trace.kmd_debug_log.log) {
-		dprintk(CVP_ERR, "%s: cvp_debug_log memory allocation failed, size 0x%x\n",
-				__func__, sizeof(struct cvp_debug_log));
-		rc = -ENOMEM;
-		goto fail_dbglog_alloc;
-	} else {
-		memset((void *)core->kmd_trace.kmd_debug_log.log, 0, sizeof(struct cvp_debug_log));
-	}
-
 	dprintk(CVP_CORE, "populating sub devices\n");
 	/*
 	 * Trigger probe for each sub-device i.e. qcom,msm-cvp,context-bank.
@@ -408,7 +388,8 @@ static int msm_probe_cvp_device(struct platform_device *pdev)
 		dprintk(CVP_ERR, "Failed to trigger probe for sub-devices\n");
 		goto err_fail_sub_device_probe;
 	}
-	atomic64_set(&core->kernel_trans_id, MAX_PKT_IDX);
+
+	atomic64_set(&core->kernel_trans_id, ARRAY_SIZE(cvp_hfi_defs));
 
 	if (core->resources.dsp_enabled) {
 		rc = cvp_dsp_device_init();
@@ -418,20 +399,9 @@ static int msm_probe_cvp_device(struct platform_device *pdev)
 		dprintk(CVP_DSP, "DSP interface not enabled\n");
 	}
 
-	if (core->platform_data->hal_version == DEFAULT_HAL_VER)
-		set_pakala_hal_functions();
-	else if (core->platform_data->hal_version == KNP_HAL_VER)
-		set_kaanapali_hal_functions();
-	else {
-		dprintk(CVP_ERR, "Invalid hal_version %d\n", core->platform_data->hal_version);
-		rc = -EINVAL;
-	}
 	return rc;
 
 err_fail_sub_device_probe:
-	vfree(core->kmd_trace.kmd_debug_log.log);
-	core->kmd_trace.kmd_debug_log.log = NULL;
-fail_dbglog_alloc:
 	cvp_hfi_deinitialize(core->hfi_type, core->dev_ops);
 	debugfs_remove_recursive(cvp_driver->debugfs_root);
 err_hfi_initialize:
@@ -466,11 +436,6 @@ static int msm_cvp_probe_bus(struct platform_device *pdev)
 	return cvp_read_bus_resources_from_dt(pdev);
 }
 
-static int msm_cvp_probe_ipclite_mappings(struct platform_device *pdev)
-{
-	return cvp_read_ipclite_mappings_from_dt(pdev);
-}
-
 static int msm_cvp_probe(struct platform_device *pdev)
 {
 	if (!msm_cvp_probe_allowed)
@@ -491,9 +456,6 @@ static int msm_cvp_probe(struct platform_device *pdev)
 	} else if (of_device_is_compatible(pdev->dev.of_node,
 		"qcom,msm-cvp,mem-cdsp")) {
 		return msm_cvp_probe_mem_cdsp(pdev);
-	} else if (of_device_is_compatible(pdev->dev.of_node,
-		"qcom,msm-cvp,ipclite")) {
-		return msm_cvp_probe_ipclite_mappings(pdev);
 	}
 
 	/* How did we end up here? */
@@ -527,14 +489,10 @@ static int msm_cvp_remove(struct platform_device *pdev)
 		goto exit;
 	}
 
-	if (core->kmd_trace.kmd_debug_log.log)
-		vfree(core->kmd_trace.kmd_debug_log.log);
 	cvp_hfi_deinitialize(core->hfi_type, core->dev_ops);
 	msm_cvp_free_platform_resources(&core->resources);
 	sysfs_remove_group(&pdev->dev.kobj, &msm_cvp_core_attr_group);
 	dev_set_drvdata(&pdev->dev, NULL);
-	idr_destroy(&core->sess_idr);
-	mutex_destroy(&core->idr_lock);
 	mutex_destroy(&core->lock);
 	mutex_destroy(&core->clk_lock);
 	kfree(core);
@@ -566,7 +524,6 @@ static int msm_cvp_pm_suspend(struct device *dev)
 		dprintk(CVP_ERR, "%s invalid core\n", __func__);
 		return -EINVAL;
 	}
-	core->pm_resume = true;
 
 	rc = msm_cvp_suspend();
 	if (rc == -ENOTSUPP)
@@ -650,12 +607,14 @@ static void __exit msm_cvp_exit(void)
 module_init(msm_cvp_init);
 module_exit(msm_cvp_exit);
 
+#ifdef CVP_MMRM_ENABLED
 MODULE_SOFTDEP("pre: msm-mmrm");
-MODULE_SOFTDEP("pre: synx-driver");
-MODULE_SOFTDEP("pre: frpc-adsprpc");
-MODULE_LICENSE("GPL v2");
-#if (KERNEL_VERSION(6, 13, 0) <= LINUX_VERSION_CODE)
-MODULE_IMPORT_NS("DMA_BUF");
-#else
-MODULE_IMPORT_NS(DMA_BUF);
 #endif
+#ifdef CVP_SYNX_ENABLED
+MODULE_SOFTDEP("pre: synx-driver");
+#endif
+#ifdef CVP_FASTRPC_ENABLED
+MODULE_SOFTDEP("pre: frpc-adsprpc");
+#endif
+MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS(DMA_BUF);

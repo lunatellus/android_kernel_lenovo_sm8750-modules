@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * Copyright (c) 2023-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #ifndef _MSM_COMM_DEF_H_
@@ -25,16 +25,13 @@ enum queue_state {
 	QUEUE_INVALID,
 };
 
-#define TEMP_WORKAROUND
-
 #ifdef CONFIG_EVA_TVM
 
 #else	/* LA target starts here */
 
-#define DEFAULT_HAL_VER 1
-#define KNP_HAL_VER 2
+//#define USE_PRESIL 1
 
-#ifdef CONFIG_EVA_KALAMA
+#if defined(CONFIG_EVA_KALAMA) && !defined(USE_PRESIL)
 #define CVP_SYNX_ENABLED 1
 #define CVP_MMRM_ENABLED 1
 #define CVP_FASTRPC_ENABLED 1
@@ -42,27 +39,26 @@ enum queue_state {
 
 /*SYNX MMRM and FASTRPC are removed temporarily*/
 /*Need to put them back when dependencies are available*/
-#ifdef CONFIG_EVA_PINEAPPLE
+#if defined(CONFIG_EVA_PINEAPPLE) && !defined(USE_PRESIL)
 #define CVP_SYNX_ENABLED 1
 #endif	/* End of CONFIG_EVA_PINEAPPLE */
 
-#ifdef CONFIG_EVA_SUN
+#if defined(CONFIG_EVA_SUN) && !defined(USE_PRESIL)
 #define CVP_SYNX_ENABLED 1
 #define CVP_FASTRPC_ENABLED 1
+#define CVP_DSP_ENABLED 1
 #define CVP_MMRM_ENABLED 1
-#define CVP_SW_DBG_BUF_ENABLED 1
 #endif /* End of CONFIG_EVA_SUN*/
 
-#ifdef CONFIG_EVA_CANOE
-#define CVP_FASTRPC_ENABLED 1
-#define CVP_SYNX_ENABLED 1
-#define CVP_MMRM_ENABLED 1
-#define CVP_SW_DBG_BUF_ENABLED 1
-#endif /* End of CONFIG_EVA_CANOE*/
-
-
-#ifdef CONFIG_EVA_WAIPIO
+#if defined(CONFIG_EVA_WAIPIO) && !defined(USE_PRESIL)
 #define CVP_MINIDUMP_ENABLED 1
+#endif
+
+#ifdef USE_PRESIL
+   //#define CVP_SYNX_ENABLED 1
+   //#define CVP_FASTRPC_ENABLED 1
+   //#define CVP_DSP_ENABLED 1
+   //#define CVP_MMRM_ENABLED 1
 #endif
 
 #endif	/* End CONFIG_EVA_TVM */

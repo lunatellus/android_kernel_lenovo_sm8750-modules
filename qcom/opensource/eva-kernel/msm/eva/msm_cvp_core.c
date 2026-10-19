@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.​
+ * Copyright (c) 2023-2024, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/dma-direction.h>
@@ -64,9 +64,10 @@ int msm_cvp_private(void *cvp_inst, unsigned int cmd,
 }
 EXPORT_SYMBOL(msm_cvp_private);
 
-static bool msm_cvp_check_for_inst_overload(struct msm_cvp_core *core, u32 *instance_count)
+bool msm_cvp_check_for_inst_overload(struct msm_cvp_core *core,
+		u32 *instance_count)
 {
-	u32 secure_instance_count = 0;
+	u32 secure_instance_count = 0, cam_count = 0, cv_count = 0;
 	struct msm_cvp_inst *inst = NULL;
 	bool overload = false;
 
@@ -76,18 +77,25 @@ static bool msm_cvp_check_for_inst_overload(struct msm_cvp_core *core, u32 *inst
 		/* This flag is not updated yet for the current instance */
 		if (inst->flags & CVP_SECURE)
 			secure_instance_count++;
+		if (inst->prop.type == HFI_SESSION_DMM)
+			cam_count++;
+		else
+			cv_count++;
 	}
 	mutex_unlock(&core->lock);
 
 	/* Instance count includes current instance as well. */
 
-	if (*instance_count >= core->resources.max_inst_count) {
+	if ((*instance_count > core->resources.max_inst_count) ||
+		(secure_instance_count >=
+			core->resources.max_secure_inst_count))
 		overload = true;
-		dprintk(CVP_WARN, "Reached %d generic CV session limit\n", MAX_CV_INSTANCES);
-	} else if (secure_instance_count >= core->resources.max_secure_inst_count) {
+	if (cam_count > MAX_DMM_INSTANCES) {
+		dprintk(CVP_WARN, "Reached 8 DMM session limit\n");
 		overload = true;
-		dprintk(CVP_WARN, "Reached %d secure CV session limit\n",
-				core->resources.max_secure_inst_count);
+	} else if (cv_count > MAX_CV_INSTANCES) {
+		dprintk(CVP_WARN, "Reached 8 generic CV session limit\n");
+		overload = true;
 	}
 
 	return overload;
@@ -143,24 +151,13 @@ static void __deinit_session_queue(struct msm_cvp_inst *inst)
 	wake_up_all(&inst->session_queue.wq);
 }
 
-static void close_helper(struct kref *kref)
-{
-	struct msm_cvp_inst *inst;
-
-	if (!kref)
-		return;
-	inst = container_of(kref, struct msm_cvp_inst, kref);
-
-	msm_cvp_destroy(inst);
-}
-
 struct msm_cvp_inst *msm_cvp_open(int session_type, struct task_struct *task)
 {
 	struct msm_cvp_inst *inst = NULL;
 	struct msm_cvp_core *core = NULL;
 	int rc = 0;
 	int i = 0;
-	u32 instance_count = 0;
+	u32 instance_count;
 
 	core = cvp_driver->cvp_core;
 	if (!core) {
@@ -186,8 +183,8 @@ struct msm_cvp_inst *msm_cvp_open(int session_type, struct task_struct *task)
 
 	inst = kzalloc(sizeof(*inst), GFP_KERNEL);
 	if (!inst) {
+		dprintk(CVP_ERR, "Failed to allocate memory\n");
 		rc = -ENOMEM;
-		dprintk(CVP_ERR, "Failed to allocate memory %d\n", rc);
 		goto err_invalid_core;
 	}
 
@@ -198,8 +195,8 @@ struct msm_cvp_inst *msm_cvp_open(int session_type, struct task_struct *task)
 	spin_lock_init(&inst->event_handler.lock);
 
 	INIT_MSM_CVP_LIST(&inst->persistbufs);
-	INIT_MSM_CVP_LIST(&inst->persist_list);
 	INIT_DMAMAP_CACHE(&inst->dma_cache);
+	INIT_MSM_CVP_LIST(&inst->cvpdspbufs);
 	INIT_MSM_CVP_LIST(&inst->cvpwnccbufs);
 	INIT_MSM_CVP_LIST(&inst->frames);
 
@@ -218,7 +215,6 @@ struct msm_cvp_inst *msm_cvp_open(int session_type, struct task_struct *task)
 	inst->clk_data.ddr_bw = 0;
 	inst->clk_data.sys_cache_bw = 0;
 	inst->clk_data.bitrate = 0;
-	inst->pm_qos_latency = core->resources.pm_qos.latency_us;
 
 	for (i = SESSION_MSG_INDEX(SESSION_MSG_START);
 		i <= SESSION_MSG_INDEX(SESSION_MSG_END); i++) {
@@ -252,9 +248,24 @@ struct msm_cvp_inst *msm_cvp_open(int session_type, struct task_struct *task)
 
 	return inst;
 fail_init:
-	kref_put(&inst->kref, close_helper);
+	__deinit_session_queue(inst);
+	__deinit_fence_queue(inst);
+	mutex_lock(&core->lock);
+	list_del(&inst->list);
+	mutex_unlock(&core->lock);
+	mutex_destroy(&inst->sync_lock);
+	mutex_destroy(&inst->lock);
+
+	DEINIT_MSM_CVP_LIST(&inst->persistbufs);
+	DEINIT_DMAMAP_CACHE(&inst->dma_cache);
+	DEINIT_MSM_CVP_LIST(&inst->cvpdspbufs);
+	DEINIT_MSM_CVP_LIST(&inst->cvpwnccbufs);
+	DEINIT_MSM_CVP_LIST(&inst->frames);
+
+	kfree(inst);
+	inst = NULL;
 err_invalid_core:
-	return NULL;
+	return inst;
 }
 EXPORT_SYMBOL(msm_cvp_open);
 
@@ -268,7 +279,7 @@ check_again:
 	spin_lock(&sq->lock);
 	if (sq->msg_count && sq->state != QUEUE_ACTIVE) {
 		list_for_each_entry_safe(mptr, dummy, &sq->msgs, node) {
-			ktid = mptr->pkt.header.client_data.kdata;
+			ktid = mptr->pkt.client_data.kdata;
 			if (ktid) {
 				list_del_init(&mptr->node);
 				sq->msg_count--;
@@ -290,38 +301,42 @@ check_again:
 static int msm_cvp_cleanup_instance(struct msm_cvp_inst *inst)
 {
 	bool empty;
-	int rc = 0, max_retries;
+	int rc, max_retries;
 	struct msm_cvp_frame *frame;
 	struct cvp_session_queue *sq, *sqf;
 	struct cvp_hfi_ops *ops_tbl;
-	struct msm_cvp_core *core = NULL;
+	struct msm_cvp_inst *tmp;
 
 	if (!inst) {
 		dprintk(CVP_ERR, "%s: invalid params\n", __func__);
 		return -EINVAL;
 	}
 
-	core = cvp_driver->cvp_core;
-	if (!core) {
-		dprintk(CVP_ERR, "%s: core is NULL", __func__);
-		return -EINVAL;
-	}
-
-	inst = cvp_get_inst(core, inst);
-	if (!inst) {
-		dprintk(CVP_ERR, "%s has a invalid session %llx\n",
-			__func__, inst);
-		goto exit;
-	}
-
 	sqf = &inst->session_queue_fence;
 	sq = &inst->session_queue;
 
-	rc = msm_cvp_session_flush_stop(inst);
-	if (rc == -ECONNRESET)
-		goto exit;
-	if (rc)
-		goto err_timeout;
+	max_retries =  inst->core->resources.msm_cvp_hw_rsp_timeout >> 5;
+	msm_cvp_session_queue_stop(inst);
+
+wait_dsp:
+	mutex_lock(&inst->cvpdspbufs.lock);
+	empty = list_empty(&inst->cvpdspbufs.list);
+	if (!empty && max_retries > 0) {
+		mutex_unlock(&inst->cvpdspbufs.lock);
+		usleep_range(2000, 3000);
+		max_retries--;
+		goto wait_dsp;
+	}
+	mutex_unlock(&inst->cvpdspbufs.lock);
+
+	if (!empty) {
+		dprintk(CVP_WARN, "Failed sess %pK DSP frame pending\n", inst);
+		/*
+		 * A session is either DSP session or CPU session, cannot have both
+		 * DSP and frame buffers
+		 */
+		goto stop_session;
+	}
 
 	max_retries =  inst->core->resources.msm_cvp_hw_rsp_timeout >> 1;
 wait_frame:
@@ -349,23 +364,42 @@ wait_frame:
 		inst->core->synx_ftbl->cvp_dump_fence_queue(inst);
 	}
 
+stop_session:
+	tmp = cvp_get_inst_validate(inst->core, inst);
+	if (!tmp) {
+		dprintk(CVP_ERR, "%s has a invalid session %llx\n",
+			__func__, inst);
+		goto exit;
+	}
+
+	if (inst->session_queue.state != QUEUE_STOP) {
+		rc = msm_cvp_session_flush_stop(inst);
+		if (rc)
+			goto err_timeout;
+		/* Continue to release ARP anyway */
+	}
+	cvp_put_inst(tmp);
 exit:
+	if (cvp_release_arp_buffers(inst))
+		dprintk_rl(CVP_WARN,
+			"Failed to release persist buffers\n");
 
-	if (inst) {
-		if (rc == 0 || rc == -ECONNRESET) {
-			if (cvp_release_arp_buffers(inst))
-				dprintk_rl(CVP_WARN,
-					"Failed to release persist buffers\n");
-
-			inst->pm_qos_latency = PM_QOS_RESUME_LATENCY_DEFAULT_VALUE;
-			ops_tbl = inst->core->dev_ops;
-			call_hfi_op(ops_tbl, pm_qos_update, ops_tbl->hfi_device_data);
-		}
-		cvp_put_inst(inst);
+	if (inst->prop.type == HFI_SESSION_FD
+		|| inst->prop.type == HFI_SESSION_DMM) {
+		spin_lock(&inst->core->resources.pm_qos.lock);
+		if (inst->core->resources.pm_qos.off_vote_cnt > 0)
+			inst->core->resources.pm_qos.off_vote_cnt--;
+		else
+			dprintk(CVP_INFO, "%s Unexpected pm_qos off vote %d\n",
+				__func__,
+				inst->core->resources.pm_qos.off_vote_cnt);
+		spin_unlock(&inst->core->resources.pm_qos.lock);
+		ops_tbl = inst->core->dev_ops;
+		call_hfi_op(ops_tbl, pm_qos_update, ops_tbl->hfi_device_data);
 	}
 	return 0;
 err_timeout:
-	cvp_put_inst(inst);
+	cvp_put_inst(tmp);
 	return rc;
 }
 
@@ -384,13 +418,6 @@ int msm_cvp_destroy(struct msm_cvp_inst *inst)
 		cvp_dsp_del_sess(inst->dsp_handle, inst);
 		inst->task = NULL;
 	}
-	if (atomic_read(&inst->persist_usage) > 0 || atomic_read(&inst->frame_usage) > 0) {
-		dprintk(CVP_WARN,
-			"%s: Memleak detected for sess_id 0x%x persist_usage %d, frame_usage %d\n",
-			__func__, inst->sess_id,
-			atomic_read(&inst->persist_usage), atomic_read(&inst->frame_usage));
-
-	}
 
 	/* Ensure no path has core->clk_lock and core->lock sequence */
 	mutex_lock(&core->lock);
@@ -402,8 +429,8 @@ int msm_cvp_destroy(struct msm_cvp_inst *inst)
 	mutex_unlock(&core->lock);
 
 	DEINIT_MSM_CVP_LIST(&inst->persistbufs);
-	DEINIT_MSM_CVP_LIST(&inst->persist_list);
 	DEINIT_DMAMAP_CACHE(&inst->dma_cache);
+	DEINIT_MSM_CVP_LIST(&inst->cvpdspbufs);
 	DEINIT_MSM_CVP_LIST(&inst->cvpwnccbufs);
 	DEINIT_MSM_CVP_LIST(&inst->frames);
 
@@ -421,7 +448,7 @@ int msm_cvp_destroy(struct msm_cvp_inst *inst)
 
 	pr_info(CVP_PID_TAG
 		"closed cvp instance: %pK session_id = %d type %d %d\n",
-		current->pid, current->tgid, inst->proc_name, inst, inst->sess_id,
+		current->pid, current->tgid, inst->proc_name, inst, hash32_ptr(inst->session),
 		inst->session_type, core->smem_leak_count);
 	inst->session = (void *)0xdeadbeef;
 	if (atomic_read(&inst->smem_count) > 0) {
@@ -441,6 +468,17 @@ int msm_cvp_destroy(struct msm_cvp_inst *inst)
 	return 0;
 }
 
+static void close_helper(struct kref *kref)
+{
+	struct msm_cvp_inst *inst;
+
+	if (!kref)
+		return;
+	inst = container_of(kref, struct msm_cvp_inst, kref);
+
+	msm_cvp_destroy(inst);
+}
+
 int msm_cvp_close(void *instance)
 {
 	struct msm_cvp_inst *inst = instance;
@@ -453,7 +491,7 @@ int msm_cvp_close(void *instance)
 
 	pr_info(CVP_PID_TAG
 		"to close instance: %pK session_id = %#x type %d state %d\n",
-		current->pid, current->tgid, inst->proc_name, inst, inst->sess_id,
+		current->pid, current->tgid, inst->proc_name, inst, hash32_ptr(inst->session),
 		inst->session_type, inst->state);
 
 	if (inst->session == 0) {
@@ -472,16 +510,10 @@ int msm_cvp_close(void *instance)
 		if (rc) {
 			dprintk(CVP_ERR,
 				"%s: cleanup instance failed for session %llx (%#x) rc %d\n",
-				__func__, inst, inst->sess_id, rc);
+				__func__, inst, hash32_ptr(inst->session), rc);
 			return -EINVAL;
 		}
-		rc = msm_cvp_session_deinit(inst);
-		if (rc) {
-			dprintk(CVP_ERR, "session_deinit failed for inst %pK with rc %d\n",
-					inst, rc);
-			rc = msm_cvp_deinit_core(inst);
-			goto exit;
-		}
+		msm_cvp_session_deinit(inst);
 	}
 
 	rc = msm_cvp_comm_try_state(inst, MSM_CVP_CORE_UNINIT);

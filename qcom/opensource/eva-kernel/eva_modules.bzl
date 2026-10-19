@@ -31,13 +31,9 @@ register_eva_module(
         "eva/msm_cvp_platform.c",
         "eva/msm_cvp_res_parse.c",
         "eva/msm_cvp_synx.c",
-        "eva/msm_cvp_sw_dbg.c",
         "eva/vm/cvp_vm_main.c",
         "eva/vm/cvp_vm_msgq.c",
         "eva/vm/cvp_vm_resource.c",
-        "eva/target/cvp_kaanapali_hal.c",
-        "eva/target/cvp_pakala_hal.c",
-        "eva/target/cvp_hawi_hal.c"
     ],
     config_deps = {
        "TARGET_SYNX_ENABLE": [

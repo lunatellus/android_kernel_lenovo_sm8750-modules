@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * Copyright (c) 2023-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #ifndef _MSM_CVP_INTERNAL_H_
@@ -24,11 +24,11 @@
 #include "msm_cvp_core.h"
 #include <media/msm_eva_private.h>
 #include "cvp_hfi_api.h"
-#include "cvp_hfi.h"
-#include "msm_cvp_sw_dbg.h"
+#include "cvp_hfi_helper.h"
 
-#define MAX_SUPPORTED_INSTANCES 32
-#define MAX_CV_INSTANCES MAX_SUPPORTED_INSTANCES
+#define MAX_SUPPORTED_INSTANCES 16
+#define MAX_CV_INSTANCES 12
+#define MAX_DMM_INSTANCES 8
 #define MAX_DEBUGFS_NAME 50
 #define MAX_DSP_INIT_ATTEMPTS 16
 #define FENCE_WAIT_SIGNAL_TIMEOUT 100
@@ -50,14 +50,11 @@
 
 #define ARP_BUF_SIZE 0x300000
 
-#define ARP_CHUNK_SIZE 204800
-
 #define CVP_RT_PRIO_THRESHOLD 1
 
 #define MAX_CVP_ERROR_COUNT 65535
 
 struct msm_cvp_inst;
-struct cvp_dsp_fastrpc_driver_entry;
 
 enum cvp_core_state {
 	CVP_CORE_UNINIT = 0,
@@ -151,10 +148,6 @@ struct msm_cvp_platform_data {
 	unsigned int vm_id;	/* pvm: 1; tvm: 2 */
 	struct msm_cvp_ubwc_config_data *ubwc_config;
 	struct msm_cvp_qos_setting *noc_qos;
-	struct msm_cvp_hfi_defs *cvp_hfi;
-	struct msm_cvp_hfi_defs *cvp_hfi_msg;
-	uint32_t hfi_ver;
-	uint32_t hal_version;
 };
 
 struct cvp_kmem_cache {
@@ -247,7 +240,6 @@ struct cvp_session_prop {
 	u32 priority;
 	u32 is_secure;
 	u32 dsp_mask;
-	u32 pkt_concurrency;
 	u32 fthread_nr;
 	u32 cycles[HFI_MAX_HW_THREADS];
 	u32 fw_cycles;
@@ -279,6 +271,70 @@ struct cvp_session_event {
 	wait_queue_head_t wq;
 };
 
+#define MAX_ENTRIES 64
+
+struct smem_data {
+	u32 size;
+	u32 flags;
+	u32 device_addr;
+	u32 bitmap_index;
+	u32 refcount;
+	u32 pkt_type;
+	u32 buf_idx;
+};
+
+struct cvp_buf_data {
+	u32 device_addr;
+	u32 size;
+};
+
+struct inst_snapshot {
+	void *session;
+	u32 smem_index;
+	u32 dsp_index;
+	u32 persist_index;
+	struct smem_data smem_log[MAX_ENTRIES];
+	struct cvp_buf_data dsp_buf_log[MAX_ENTRIES];
+	struct cvp_buf_data persist_buf_log[MAX_ENTRIES];
+};
+
+struct cvp_noc_log {
+	u32 used;
+	u32 err_ctrl_swid_low;
+	u32 err_ctrl_swid_high;
+	u32 err_ctrl_mainctl_low;
+	u32 err_ctrl_errvld_low;
+	u32 err_ctrl_errclr_low;
+	u32 err_ctrl_errlog0_low;
+	u32 err_ctrl_errlog0_high;
+	u32 err_ctrl_errlog1_low;
+	u32 err_ctrl_errlog1_high;
+	u32 err_ctrl_errlog2_low;
+	u32 err_ctrl_errlog2_high;
+	u32 err_ctrl_errlog3_low;
+	u32 err_ctrl_errlog3_high;
+	u32 err_core_swid_low;
+	u32 err_core_swid_high;
+	u32 err_core_mainctl_low;
+	u32 err_core_errvld_low;
+	u32 err_core_errclr_low;
+	u32 err_core_errlog0_low;
+	u32 err_core_errlog0_high;
+	u32 err_core_errlog1_low;
+	u32 err_core_errlog1_high;
+	u32 err_core_errlog2_low;
+	u32 err_core_errlog2_high;
+	u32 err_core_errlog3_low;
+	u32 err_core_errlog3_high;
+	u32 arp_test_bus[16];
+	u32 dma_test_bus[512];
+};
+
+struct cvp_debug_log {
+	struct cvp_noc_log noc_log;
+	u32 snapshot_index;
+	struct inst_snapshot snapshot[16];
+};
 
 struct msm_cvp_core {
 	struct mutex lock;
@@ -301,7 +357,6 @@ struct msm_cvp_core {
 	struct work_struct ssr_work;
 	enum hal_ssr_trigger_type ssr_type;
 	u32 soc_version;
-	u32 fw_version;
 	u32 smmu_fault_count;
 	u32 last_fault_addr;
 	u32 ssr_count;
@@ -311,17 +366,7 @@ struct msm_cvp_core {
 	unsigned long orig_core_sum;
 	unsigned long bw_sum;
 	atomic64_t kernel_trans_id;
-	atomic_t va_watermark;
-	struct eva_kmd_debug kmd_dbg;
-	struct eva_kmd_trace kmd_trace;
-	ktime_t last_msg_ts;
-	ktime_t last_fw_fetch_ts;
-	u32 cur_cmd_q_read_offset;
-	u32 prev_cmd_q_read_offset;
-
-	struct idr sess_idr;
-	struct mutex idr_lock;
-	bool pm_resume;
+	struct cvp_debug_log log;
 };
 
 struct msm_cvp_inst {
@@ -330,7 +375,6 @@ struct msm_cvp_inst {
 	struct mutex sync_lock, lock;
 	struct msm_cvp_core *core;
 	enum session_type session_type;
-	struct cvp_dsp_fastrpc_driver_entry *fastrpc_entry;
 	u32 dsp_handle;
 	struct task_struct *task;
 	atomic_t smem_count;
@@ -338,17 +382,15 @@ struct msm_cvp_inst {
 	struct cvp_session_queue session_queue_fence;
 	struct cvp_session_event event_handler;
 	void *session;
-	u32 sess_id;
 	enum instance_state state;
 	struct msm_cvp_list freqs;
 	struct msm_cvp_list persistbufs;
-	struct msm_cvp_list persist_list;
-	atomic_t persist_usage;
-	atomic_t frame_usage;
 	struct cvp_dmamap_cache dma_cache;
+	struct msm_cvp_list cvpdspbufs;
 	struct msm_cvp_list cvpwnccbufs;
 	struct msm_cvp_list frames;
 	struct cvp_frame_bufs last_frame;
+	struct cvp_frame_bufs unused_dsp_bufs;
 	struct cvp_frame_bufs unused_wncc_bufs;
 	u32 cvpwnccbufs_num;
 	struct msm_cvp_wncc_buffer* cvpwnccbufs_table;
@@ -369,8 +411,6 @@ struct msm_cvp_inst {
 	struct synx_session *synx_session_id;
 	struct cvp_fence_queue fence_cmd_queue;
 	char proc_name[TASK_COMM_LEN];
-	u32 pm_qos_latency;
-	atomic_t va_inst_watermark;
 };
 
 extern struct msm_cvp_drv *cvp_driver;
@@ -390,4 +430,5 @@ int msm_cvp_destroy(struct msm_cvp_inst *inst);
 void *cvp_get_drv_data(struct device *dev);
 void *cvp_kmem_cache_zalloc(struct cvp_kmem_cache *k, gfp_t flags);
 void cvp_kmem_cache_free(struct cvp_kmem_cache *k, void *obj);
+bool msm_cvp_check_for_inst_overload(struct msm_cvp_core *core, u32 *instance_count);
 #endif

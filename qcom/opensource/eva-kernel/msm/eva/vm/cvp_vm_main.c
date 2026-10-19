@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only
  *
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * Copyright (c) 2022-2024, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 #include <asm/memory.h>
 #include <linux/coresight-stm.h>
@@ -30,7 +30,7 @@
 #include "hfi_packetization.h"
 #include "msm_cvp_debug.h"
 #include "cvp_core_hfi.h"
-#include "cvp_hfi.h"
+#include "cvp_hfi_helper.h"
 #include "cvp_hfi_io.h"
 #include "msm_cvp_dsp.h"
 #include "msm_cvp_clocks.h"
@@ -146,14 +146,6 @@ static int msm_cvp_vm_init_reg_and_irq(struct iris_hfi_device *device,
 			"could not map reg addr %pa of size %d\n",
 			&res->register_base, res->register_size);
 		goto error_irq_fail;
-	}
-
-	hal->tcsr_reg_base = devm_ioremap(&res->pdev->dev,
-			TCSR_REG_BASE, TCSR_REG_SIZE);
-	if (!hal->tcsr_reg_base) {
-		dprintk(CVP_ERR,
-		"could not map DDR reg addr %pa of size %d\n",
-		TCSR_REG_BASE, TCSR_REG_SIZE);
 	}
 
 	if (res->gcc_reg_base) {
