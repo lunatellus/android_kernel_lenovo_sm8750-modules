@@ -184,16 +184,20 @@ static int wl2868c_regulator_enable(struct regulator_dev *rdev)
 	ret = regmap_read(regmap, chip->ldo_en_addr, &value);
 	if (ret < 0) {
 		PMIC_LOG("read ldo en reg failed");
-		return -EIO;
+		ret = -EIO;
+		goto out_unlock;
 	}
 
 	value |= 1 << reg->channel_num;
 	ret = regmap_write(regmap, chip->ldo_en_addr, value);
 	if (ret < 0) {
 		PMIC_LOG("write ldo enable address failed");
-		return -EIO;
+		ret = -EIO;
+		goto out_unlock;
 	}
 	PMIC_LOG("Enable %s", reg->regulator_name);
+
+out_unlock:
 	mutex_unlock(&i2c_control_mutex);
 	return ret;
 }
@@ -215,7 +219,8 @@ static int wl2868c_regulator_disable(struct regulator_dev *rdev)
 	ret = regmap_read(regmap, chip->ldo_en_addr, &value);
 	if (ret < 0) {
 		PMIC_LOG("read ldo en reg failed");
-		return -EIO;
+		ret = -EIO;
+		goto out_unlock;
 	}
 
 	value &= ~(1 << reg->channel_num);
@@ -223,9 +228,11 @@ static int wl2868c_regulator_disable(struct regulator_dev *rdev)
 	ret = regmap_write(regmap, chip->ldo_en_addr, value);
 	if (ret < 0) {
 		PMIC_LOG("write ldo enable address failed");
-		return -EIO;
+		ret = -EIO;
+		goto out_unlock;
 	}
 
+out_unlock:
 	mutex_unlock(&i2c_control_mutex);
 	return ret;
 }
