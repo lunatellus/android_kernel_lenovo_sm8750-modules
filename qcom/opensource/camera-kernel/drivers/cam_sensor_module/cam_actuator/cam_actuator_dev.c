@@ -852,10 +852,19 @@ static int cam_actuator_platform_component_bind(struct device *dev,
 	CAM_DBG(CAM_ACTUATOR, "Component bound successfully %d",
 		a_ctrl->soc_info.index);
 
-	wide_a_ctrl = a_ctrl;
-	rc = sysfs_create_file(&pdev->dev.kobj, &dev_attr_moveVCM.attr);
 	INIT_DELAYED_WORK(&poweron_work, poweron_work_func);
 	INIT_DELAYED_WORK(&poweroff_work, poweroff_work_func);
+	movingStatus = 0;
+	wide_a_ctrl = a_ctrl;
+	rc = sysfs_create_file(&pdev->dev.kobj, &dev_attr_moveVCM.attr);
+	if (rc)
+		goto clear_ctrl;
+
+	nb.notifier_call = haptic_callback;
+	rc = register_haptic_notify(&nb);
+	if (rc)
+		goto remove_sysfs;
+
 	g_i3c_actuator_data[a_ctrl->soc_info.index].a_ctrl = a_ctrl;
 	init_completion(&g_i3c_actuator_data[a_ctrl->soc_info.index].probe_complete);
 	CAM_GET_TIMESTAMP(ts_end);
@@ -864,6 +873,15 @@ static int cam_actuator_platform_component_bind(struct device *dev,
 
 	return rc;
 
+remove_sysfs:
+	sysfs_remove_file(&pdev->dev.kobj, &dev_attr_moveVCM.attr);
+	cancel_delayed_work_sync(&poweron_work);
+	cancel_delayed_work_sync(&poweroff_work);
+clear_ctrl:
+	wide_a_ctrl = NULL;
+	platform_set_drvdata(pdev, NULL);
+	cam_unregister_subdev(&(a_ctrl->v4l2_dev_str));
+	v4l2_set_subdevdata(&a_ctrl->v4l2_dev_str.sd, NULL);
 destroy_worker:
 	cam_worker_wrapper_deinit(a_ctrl->worker_ctx);
 free_and_destroy:
@@ -891,12 +909,16 @@ static void cam_actuator_platform_component_unbind(struct device *dev,
 		return;
 	}
 
+	sysfs_remove_file(&pdev->dev.kobj, &dev_attr_moveVCM.attr);
+	unregister_haptic_notify(&nb);
+	cancel_delayed_work_sync(&poweron_work);
+	cancel_delayed_work_sync(&poweroff_work);
+	wide_a_ctrl = NULL;
+
 	mutex_lock(&(a_ctrl->actuator_mutex));
 	cam_actuator_shutdown(a_ctrl);
 	mutex_unlock(&(a_ctrl->actuator_mutex));
 	cam_unregister_subdev(&(a_ctrl->v4l2_dev_str));
-	if (wide_a_ctrl)
-		wide_a_ctrl = NULL;
 	cam_worker_wrapper_deinit(a_ctrl->worker_ctx);
 	mutex_destroy(&a_ctrl->actuator_park_mutex);
 	mutex_destroy(&(a_ctrl->actuator_mutex));
@@ -923,7 +945,6 @@ static void cam_actuator_platform_remove(
 #endif
 {
 	component_del(&pdev->dev, &cam_actuator_platform_component_ops);
-	unregister_haptic_notify(&nb);
 
 	cam_soc_util_uninitialize_power_domain(&pdev->dev);
 
@@ -950,8 +971,6 @@ static int32_t cam_actuator_driver_platform_probe(
 	rc = component_add(&pdev->dev, &cam_actuator_platform_component_ops);
 	if (rc)
 		CAM_ERR(CAM_ACTUATOR, "failed to add component rc: %d", rc);
-	nb.notifier_call = haptic_callback;
-	register_haptic_notify(&nb);
 	return rc;
 }
 
