@@ -229,6 +229,70 @@ static inline int bl_set_current(struct elden_bl_profile *profile, long level)
 	return 0;
 }
 
+/*
+ * Time between raising HWEN (pinctrl "default") and the first register
+ * write. Writes issued while the chip is still powering up are lost
+ * without an I2C error. usleep_range() is hrtimer based; the msleep(4)
+ * used before returned after as little as 0.28 ms when waking from s2idle.
+ */
+#define BL_HWEN_SETTLE_US	5000
+#define BL_INIT_ATTEMPTS	3
+
+/* Read back the final value of each init-table register except brightness. */
+static int bl_verify_init_table(struct elden_bl_profile *profile)
+{
+	const u8 *table = profile->init;
+	int len = profile->init_len;
+	unsigned int val;
+	int i, j, ret;
+
+	for (i = 0; i < len; i++) {
+		const u8 *e = &table[i * 3];
+
+		if (e[0] == profile->params[5] || e[0] == profile->params[6])
+			continue;
+		for (j = i + 1; j < len; j++)
+			if (table[j * 3] == e[0])
+				break;
+		if (j != len)
+			continue;
+		ret = regmap_read(profile->regmap, e[0], &val);
+		if (ret)
+			return ret;
+		if ((val & e[2]) != (e[1] & e[2])) {
+			pr_err("[drm][bl][%s] %s: reg %02x=%02x, expected %02x\n",
+			       __func__, profile->name, e[0], val, e[1]);
+			return -EAGAIN;
+		}
+	}
+	return 0;
+}
+
+/* Program a chip that was just powered up through HWEN. */
+static int bl_power_on_init(struct elden_bl_profile *profile, long hbm_level)
+{
+	int attempt, ret;
+
+	for (attempt = 1; attempt <= BL_INIT_ATTEMPTS; attempt++) {
+		usleep_range(BL_HWEN_SETTLE_US, BL_HWEN_SETTLE_US + 1000);
+		ret = bl_set_current(profile, hbm_level);
+		if (ret)
+			return ret;
+		ret = bl_set_init_table(profile);
+		if (ret)
+			return ret;
+		ret = bl_set_current(profile, hbm_level);
+		if (ret)
+			return ret;
+		ret = bl_verify_init_table(profile);
+		if (ret != -EAGAIN)
+			return ret;
+	}
+	pr_err("[drm][bl][%s] %s: init table not applied after %d attempts\n",
+	       __func__, profile->name, BL_INIT_ATTEMPTS);
+	return 0;
+}
+
 static void bl_check_regs(struct work_struct *work)
 {
 	u8 regs[32];
@@ -494,14 +558,7 @@ int bl_set_level(u32 level)
 				       __func__, 352);
 				return ret;
 			}
-			msleep(4);
-			ret = bl_set_current(p, bl_context.hbm_level);
-			if (ret)
-				return ret;
-			ret = bl_set_init_table(p);
-			if (ret)
-				return ret;
-			ret = bl_set_current(p, bl_context.hbm_level);
+			ret = bl_power_on_init(p, bl_context.hbm_level);
 			if (ret)
 				return ret;
 		}
