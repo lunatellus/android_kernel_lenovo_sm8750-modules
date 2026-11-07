@@ -350,7 +350,7 @@ static void rmnet_force_unassociate_device(struct net_device *dev)
 
 	hash_for_each_safe(port->muxed_ep, bkt_ep, tmp_ep, ep, hlnode) {
 		unregister_netdevice_queue(ep->egress_dev, &list);
-		rmnet_vnd_dellink(ep->mux_id, port, ep);
+		port->nr_rmnet_devs--;
 
 		hlist_del_init_rcu(&ep->hlnode);
 		hlist_add_head(&ep->hlnode, &cleanup_list);
