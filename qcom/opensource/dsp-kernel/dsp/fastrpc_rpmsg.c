@@ -380,7 +380,6 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 			&data->rootheap_buf_count);
 
 	kref_init(&data->refcount);
-	dev_set_drvdata(&rpdev->dev, data);
 	rdev->dma_mask = &data->dma_mask;
 	dma_set_mask_and_coherent(rdev, DMA_BIT_MASK(32));
 	INIT_LIST_HEAD(&data->users);
@@ -401,6 +400,7 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 	data->domain = domain;
 	data->unsigned_support = false;
 	data->cpuinfo_todsp = FASTRPC_CPUINFO_DEFAULT;
+	dev_set_drvdata(&rpdev->dev, data);
 
 	err = of_platform_populate(rdev->of_node, NULL, NULL, rdev);
 	if (err)

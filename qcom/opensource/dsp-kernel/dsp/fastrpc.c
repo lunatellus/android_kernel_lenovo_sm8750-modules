@@ -8418,6 +8418,9 @@ int fastrpc_handle_rpc_response(struct fastrpc_channel_ctx *cctx, void *data,
 	u64 ctxid = 0;
 	u32 rsp_flags = 0, early_wake_time = 0, version = 0;
 
+	if (!cctx)
+		return -ENODEV;
+
 	if (len == sizeof(uint64_t)) {
 		trace_fastrpc_transport_response(cctx->domain_id, *((uint64_t *)data), 0, 0, 0);
 		fastrpc_handle_signal_rpmsg(*((uint64_t *)data), cctx);
