@@ -1124,11 +1124,15 @@ static int lpass_cdc_tx_macro_enable_dec(struct snd_soc_dapm_widget *w,
 				}
 			}
 		} else {
+			/*
+			 * Without tuning values the adapt block stays off, so the
+			 * decimator must not take its output either: on 2.8 the
+			 * CFG1 default leaves bit 4 set, which attenuates the
+			 * capture by almost 40 dB.
+			 */
 			if (tx_priv->version >= LPASS_CDC_VERSION_2_8)
-			//Disable adapt block
 				snd_soc_component_update_bits(component, adapt_ctrl, 0xFF, 0x00);
-			else
-				snd_soc_component_update_bits(component, dec_gain_reg, 0x10, 0x00);
+			snd_soc_component_update_bits(component, dec_gain_reg, 0x10, 0x00);
 		}
 #endif
 		snd_soc_component_update_bits(component,
