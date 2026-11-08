@@ -409,7 +409,8 @@ int cam_flash_get_dt_data(struct cam_flash_ctrl *fctrl,
 			fctrl->flash_type = CAM_FLASH_TYPE_PMIC;
 		}
 
-	if (fctrl->flash_type == CAM_FLASH_TYPE_I2C) {
+	if (fctrl->flash_type == CAM_FLASH_TYPE_I2C ||
+	    !of_find_property(of_node, "leds", NULL)) {
 		rc = cam_get_source_node_info(of_node, fctrl, soc_info->soc_private);
 		if (rc) {
 			CAM_ERR(CAM_FLASH,
